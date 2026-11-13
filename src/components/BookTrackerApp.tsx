@@ -38,6 +38,7 @@ import {
   isStrictSecondaryReissueTitle,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
+  reconcileRefreshedBookDate,
 } from '@/lib/bookDedupe';
 import { isCustomCoverUrl, pickPreferredCoverUrl } from '@/lib/coverArt';
 import { buildDemoLibrary } from '@/lib/demoLibrary';
@@ -642,15 +643,15 @@ export function BookTrackerApp() {
               // Preserve user state (readingStatus, hidden, notes, rating, one-off flag)
               const isVellumAutoEntry = matched.id.startsWith('vellum:');
               const isUserManualEntry = Boolean(
-                matched.isManual && !isVellumAutoEntry
+                matched.isManual &&
+                  !isVellumAutoEntry &&
+                  !matched.id.startsWith('manual:batch:')
               );
-              const bestDate =
-                isUserManualEntry && matched.releaseDate
-                  ? {
-                      releaseDate: matched.releaseDate,
-                      datePrecision: matched.datePrecision,
-                    }
-                  : pickCanonicalReleaseDate(matched, incoming, todayStr);
+              const bestDate = reconcileRefreshedBookDate(
+                matched,
+                incoming,
+                todayStr
+              );
 
               nextBooksMap.set(matched.id, {
                 ...matched,
@@ -764,9 +765,18 @@ export function BookTrackerApp() {
     [settings.hardcoverToken, cloudConfig, authUserId, showToast, todayStr]
   );
 
-  // Repairs missing/placeholder release dates, 2026 paperback reissues of 2025 hardcovers,
-  // and Book Club edition suffixes across existing tracked & one-off books in the ledger.
+  // Repairs missing/placeholder release dates, 2024-2026 paperback/deluxe/Book Club reissues,
+  // publisher release-date pushbacks, and post-finish dates across tracked & one-off books.
   const ledgerRepairRunningRef = useRef(false);
+  const autoRepairInFlightKeyRef = useRef<string | null>(null);
+  const unmountedRef = useRef(false);
+
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
 
   const repairTrackedBookDatesAndReissues = useCallback(async () => {
     if (demoMode || ledgerRepairRunningRef.current) return 0;
@@ -785,15 +795,27 @@ export function BookTrackerApp() {
         }
         return true;
       };
+      const hasImpossibleFinishVsRelease = (b: BookItem): boolean =>
+        Boolean(
+          b.finishedAt &&
+            b.releaseDate &&
+            /^\d{4}-\d{2}-\d{2}$/.test(b.finishedAt) &&
+            b.releaseDate > b.finishedAt
+        );
       const candidatePriority = (b: BookItem): number => {
-        if (!b.releaseDate || b.datePrecision === 'unknown') return 0;
-        if (b.datePrecision !== 'day' || /-(01-01|12-31)$/.test(b.releaseDate)) {
-          return 1;
-        }
         if (
+          !b.releaseDate ||
+          b.datePrecision === 'unknown' ||
+          hasImpossibleFinishVsRelease(b) ||
           hasEditionDecorationInTitle(b.title) ||
           isStrictSecondaryReissueTitle(b.title)
         ) {
+          return 0;
+        }
+        if (b.datePrecision !== 'day' || /-(01-01|12-31)$/.test(b.releaseDate)) {
+          return 1;
+        }
+        if (b.releaseDate >= '2025') {
           return 2;
         }
         return 3;
@@ -803,7 +825,8 @@ export function BookTrackerApp() {
           if (!canAutoRepairBook(b)) return false;
           if (!b.releaseDate || b.datePrecision !== 'day') return true;
           if (/-(01-01|12-31)$/.test(b.releaseDate)) return true;
-          if (b.releaseDate >= '2026') return true;
+          if (hasImpossibleFinishVsRelease(b)) return true;
+          if (b.releaseDate >= '2024') return true;
           if (
             hasEditionDecorationInTitle(b.title) ||
             isStrictSecondaryReissueTitle(b.title)
@@ -817,7 +840,7 @@ export function BookTrackerApp() {
           if (hidDiff !== 0) return hidDiff;
           return candidatePriority(a) - candidatePriority(b);
         })
-        .slice(0, 500);
+        .slice(0, 600);
 
       if (candidates.length === 0) return 0;
 
@@ -830,9 +853,10 @@ export function BookTrackerApp() {
       }
 
       let updatedCount = 0;
-      const chunkSize = 45;
+      const chunkSize = 20;
 
       for (let i = 0; i < candidates.length; i += chunkSize) {
+        if (unmountedRef.current) break;
         const slice = candidates.slice(i, i + chunkSize);
         const items = slice.map((b) => ({
           clientKey: b.id,
@@ -862,10 +886,11 @@ export function BookTrackerApp() {
             if (!m) return b;
             if (!canAutoRepairBook(b)) return b;
 
-            const bestDate = pickCanonicalReleaseDate(
+            const bestDate = reconcileRefreshedBookDate(
               b,
               {
                 ...b,
+                source: m.source || b.source,
                 title: m.title || b.title,
                 releaseDate: m.releaseDate,
                 datePrecision: m.datePrecision,
@@ -946,8 +971,8 @@ export function BookTrackerApp() {
     }
   }, [demoMode, cloudConfig, authUserId]);
 
-  // Run one-time automatic background repair on existing ledgers so 2026 trade paperbacks,
-  // Book Club reissues, and missing Google Books dates fix themselves without manual intervention.
+  // Run one-time automatic background repair on existing ledgers without being cancelled
+  // mid-flight when cloudSyncStatus transitions between 'synced' and 'syncing'.
   useEffect(() => {
     if (!mounted || demoMode) return;
     if (cloudConfig && (!authUserId || cloudSyncStatus !== 'synced')) return;
@@ -958,30 +983,38 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v3:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v4:${authUserId || 'local'}`;
+    if (autoRepairInFlightKeyRef.current === repairKey) return;
     try {
       if (localStorage.getItem(repairKey) === '1') return;
-      localStorage.setItem(repairKey, '1');
     } catch {
       return;
     }
 
-    let cancelled = false;
+    autoRepairInFlightKeyRef.current = repairKey;
+
     (async () => {
-      await repairTrackedBookDatesAndReissues();
-      const authorsSnapshot = [...stateRef.current.authors];
-      for (let i = 0; i < authorsSnapshot.length; i++) {
-        if (cancelled) break;
-        await syncAuthorCatalog(authorsSnapshot[i], true, true);
-        if (i + 1 < authorsSnapshot.length) {
-          await new Promise((r) => setTimeout(r, 150));
+      try {
+        await repairTrackedBookDatesAndReissues();
+        const authorsSnapshot = [...stateRef.current.authors];
+        for (let i = 0; i < authorsSnapshot.length; i++) {
+          if (unmountedRef.current) return;
+          await syncAuthorCatalog(authorsSnapshot[i], true, true);
+          if (i + 1 < authorsSnapshot.length) {
+            await new Promise((r) => setTimeout(r, 150));
+          }
+        }
+        if (!unmountedRef.current) {
+          try {
+            localStorage.setItem(repairKey, '1');
+          } catch {}
+        }
+      } finally {
+        if (autoRepairInFlightKeyRef.current === repairKey) {
+          autoRepairInFlightKeyRef.current = null;
         }
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
   }, [
     mounted,
     demoMode,

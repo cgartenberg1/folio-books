@@ -2,6 +2,7 @@ import {
   areSameCanonicalWork,
   cleanDisplayBookTitle,
   getCanonicalWorkKey,
+  hasEditionDecorationInTitle,
   isLikelyNoiseTitle,
   isStrictSecondaryReissueTitle,
   mergeCanonicalBookPair,
@@ -271,9 +272,13 @@ function resolveHardcoverBookOriginalDate(
     release_year?: number | null;
     users_count?: number | null;
     editions?: Array<{
+      title?: string | null;
       release_date?: string | null;
       reading_format_id?: number | null;
       edition_format?: string | null;
+      edition_information?: string | null;
+      isbn_13?: string | null;
+      isbn_10?: string | null;
     }> | null;
   },
   todayStr: string = getLocalTodayStr()
@@ -283,45 +288,69 @@ function resolveHardcoverBookOriginalDate(
   const rawYear = typeof node.release_year === 'number' ? node.release_year : null;
   const usersCount = typeof node.users_count === 'number' ? node.users_count : 0;
 
-  const extractEditionDates = (nonAudioOnly: boolean): string[] =>
+  const ARC_PROOF_RE =
+    /\b(arc|advance\s+reader|advance\s+reading|uncorrected\s+proof|galley|netgalley|sampler|excerpt|free\s+preview)\b/i;
+  const SECONDARY_FORMAT_RE =
+    /\b(paperback|mass\s+market|large\s+print|deluxe|collector'?s?|anniversary|reissue|book\s+club|tie-?in)\b/i;
+  const BOGUS_EPOCH_DATES = new Set([
+    '1900-01-01',
+    '1901-01-01',
+    '1969-12-31',
+    '1970-01-01',
+  ]);
+
+  const cleanEditions = (node.editions || []).filter((ed) => {
+    const d = ed.release_date?.trim();
+    if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d) || d < '1900-01-01') return false;
+    if (BOGUS_EPOCH_DATES.has(d)) return false;
+    if (isPlaceholderDayDate(d, currentYear)) return false;
+    const edLabel = `${ed.title || ''} ${ed.edition_information || ''} ${
+      ed.edition_format || ''
+    }`;
+    if (ARC_PROOF_RE.test(edLabel)) return false;
+    return true;
+  });
+
+  const extractSortedDates = (
+    filterFn: (ed: (typeof cleanEditions)[number]) => boolean
+  ): string[] =>
     Array.from(
       new Set(
-        (node.editions || [])
-          .filter((ed) => (!nonAudioOnly ? true : ed.reading_format_id !== 2))
-          .map((ed) => ed.release_date?.trim())
-          .filter(
-            (d): d is string =>
-              Boolean(
-                d &&
-                  /^\d{4}-\d{2}-\d{2}$/.test(d) &&
-                  d >= '1900-01-01' &&
-                  !isPlaceholderDayDate(d, currentYear)
-              )
-          )
+        cleanEditions
+          .filter(filterFn)
+          .map((ed) => ed.release_date!.trim())
       )
     ).sort();
 
-  const nonAudioDates = extractEditionDates(true);
+  const nonAudioIsbnDates = extractSortedDates(
+    (ed) => ed.reading_format_id !== 2 && Boolean(ed.isbn_13 || ed.isbn_10)
+  );
+  const nonAudioDates = extractSortedDates((ed) => ed.reading_format_id !== 2);
   const validEditionDates =
-    nonAudioDates.length > 0 ? nonAudioDates : extractEditionDates(false);
+    nonAudioIsbnDates.length > 0
+      ? nonAudioIsbnDates
+      : nonAudioDates.length > 0
+      ? nonAudioDates
+      : extractSortedDates(() => true);
 
-  const isPlausibleOriginalEdition = (edDate: string): boolean => {
-    if (rawYear && rawYear >= 1950) {
-      const edYear = Number(edDate.slice(0, 4));
-      return edYear >= rawYear - 2;
-    }
-    return true;
+  const isSecondaryEditionOnDate = (targetYmd: string): boolean => {
+    const matching = cleanEditions.filter(
+      (ed) => ed.release_date?.trim() === targetYmd
+    );
+    if (matching.length === 0) return false;
+    return matching.every((ed) =>
+      SECONDARY_FORMAT_RE.test(
+        `${ed.edition_format || ''} ${ed.edition_information || ''} ${ed.title || ''}`
+      )
+    );
   };
 
   if (rawDate && /^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-    const rawIsPlaceholder = isPlaceholderDayDate(rawDate, currentYear);
+    const rawIsPlaceholder =
+      BOGUS_EPOCH_DATES.has(rawDate) || isPlaceholderDayDate(rawDate, currentYear);
 
     if (rawDate <= todayStr) {
-      // Already released according to `books.release_date`: restore first-edition date if `release_date`
-      // was overwritten by a later paperback/reissue or a `YYYY-01-01` placeholder.
-      const earliestPublishedEd = validEditionDates.find(
-        (d) => d <= todayStr && isPlausibleOriginalEdition(d)
-      );
+      const earliestPublishedEd = validEditionDates.find((d) => d <= todayStr);
 
       if (rawIsPlaceholder && earliestPublishedEd) {
         if (earliestPublishedEd.slice(0, 4) <= rawDate.slice(0, 4)) {
@@ -330,7 +359,40 @@ function resolveHardcoverBookOriginalDate(
       }
 
       if (!rawIsPlaceholder && earliestPublishedEd && earliestPublishedEd < rawDate) {
-        return { releaseDate: earliestPublishedEd, datePrecision: 'day' };
+        const gapDays = daysBetweenYmd(earliestPublishedEd, rawDate);
+        // Restore original publication date when `rawDate` was bumped to a 6+ month later
+        // paperback/deluxe/book-club reissue (e.g. Atmosphere Jun 2025 -> Jun 2026,
+        // Emily Wilde Feb 2025 -> Nov 2025, City of Brass 2017 -> 2025), or when format/year proves it.
+        if (
+          gapDays >= 180 ||
+          (rawYear !== null && rawYear >= 1900 && rawYear < Number(rawDate.slice(0, 4))) ||
+          isSecondaryEditionOnDate(rawDate) ||
+          hasEditionDecorationInTitle(node.title || '')
+        ) {
+          return { releaseDate: earliestPublishedEd, datePrecision: 'day' };
+        }
+      }
+
+      // Conversely, if EVERY English edition in Hardcover (`order_by: release_date asc_nulls_last`)
+      // is 14-400 days AFTER `books.release_date` on a modern title (e.g. The Wolf and His King
+      // delayed from Nov 27, 2025 to Jan 2026 while `books.release_date` stayed stuck at Nov 27, 2025),
+      // use the actual earliest English edition release date!
+      if (
+        !rawIsPlaceholder &&
+        earliestPublishedEd &&
+        earliestPublishedEd > rawDate &&
+        rawDate >= '2020-01-01'
+      ) {
+        const slipDays = daysBetweenYmd(rawDate, earliestPublishedEd);
+        const rawYr = Number(rawDate.slice(0, 4));
+        const edYr = Number(earliestPublishedEd.slice(0, 4));
+        if (
+          slipDays >= 14 &&
+          slipDays <= 400 &&
+          (rawYear === null || rawYear >= edYr || rawYear > rawYr)
+        ) {
+          return { releaseDate: earliestPublishedEd, datePrecision: 'day' };
+        }
       }
 
       if (rawYear && rawYear >= 1900 && rawYear < Number(rawDate.slice(0, 4))) {
@@ -342,16 +404,14 @@ function resolveHardcoverBookOriginalDate(
 
     // `rawDate > todayStr`: check if this work was actually already published earlier
     const earliestPublishedEd = validEditionDates.find(
-      (d) =>
-        d <= todayStr &&
-        daysBetweenYmd(d, rawDate) >= 45 &&
-        isPlausibleOriginalEdition(d)
+      (d) => d <= todayStr && daysBetweenYmd(d, rawDate) >= 150
     );
 
     if (
       earliestPublishedEd &&
       (usersCount >= 8 ||
         isStrictSecondaryReissueTitle(node.title || '') ||
+        hasEditionDecorationInTitle(node.title || '') ||
         Boolean(rawYear && rawYear <= currentYear))
     ) {
       return { releaseDate: earliestPublishedEd, datePrecision: 'day' };
@@ -361,7 +421,9 @@ function resolveHardcoverBookOriginalDate(
       rawYear &&
       rawYear >= 1900 &&
       rawYear < currentYear &&
-      (usersCount >= 8 || isStrictSecondaryReissueTitle(node.title || ''))
+      (usersCount >= 8 ||
+        isStrictSecondaryReissueTitle(node.title || '') ||
+        hasEditionDecorationInTitle(node.title || ''))
     ) {
       return { releaseDate: String(rawYear), datePrecision: 'year' };
     }
@@ -443,7 +505,7 @@ async function fetchEnglishHardcoverBooksMeta(
               ]
             }
             order_by: { release_date: asc_nulls_last }
-            limit: 8
+            limit: 20
           ) {
             title
             edition_format
@@ -772,13 +834,14 @@ function mergeGoogleDateIntoHardcoverItem(
     }
   }
 
-  // 2. Restore original publication date if Hardcover's record was bumped to a 2025+ paperback/reissue date
+  // 2. Restore original publication date if Hardcover's record was bumped to a 6+ month later paperback/deluxe reissue
+  // (requiring >= 180 days gap so 1-5 month publisher release-date delays are never dragged backward to stale pre-delay dates)
   if (
     hcDate.releaseDate &&
-    hcDate.releaseDate >= '2025' &&
+    hcDate.releaseDate >= '2018' &&
     gb.datePrecision === 'day' &&
     gb.releaseDate <= todayStr &&
-    gb.releaseDate >= '1995-01-01' &&
+    gb.releaseDate >= '1950-01-01' &&
     !isPlaceholderDayDate(gb.releaseDate, currentYear) &&
     Boolean(gb.isbn || (gb.pageCount && gb.pageCount >= 40))
   ) {
@@ -789,7 +852,7 @@ function mergeGoogleDateIntoHardcoverItem(
         ? `${hcDate.releaseDate}-15`
         : `${hcDate.releaseDate}-06-15`;
     const gapDays = daysBetweenYmd(gb.releaseDate, hcComparable);
-    if (gapDays >= 45 && gapDays <= 365 * 15) {
+    if (gapDays >= 180 && gapDays <= 365 * 40) {
       return { releaseDate: gb.releaseDate, datePrecision: 'day' };
     }
   }
@@ -987,7 +1050,7 @@ export async function searchCatalog(params: {
   hardcoverError?: string;
 }> {
   const { query, mode = 'all', hardcoverToken, googleApiKey } = params;
-  const cacheKey = `search:v3:en:${mode}::${Boolean(hardcoverToken?.trim())}::${query
+  const cacheKey = `search:v4:en:${mode}::${Boolean(hardcoverToken?.trim())}::${query
     .trim()
     .toLowerCase()}`;
   const cached = getCachedValue<{
@@ -1106,7 +1169,7 @@ const HARDCOVER_EDITION_COVER_FRAGMENT = `
       ]
     }
     order_by: { release_date: asc_nulls_last }
-    limit: 8
+    limit: 20
   ) {
     title
     edition_format
@@ -1351,6 +1414,21 @@ async function fetchHardcoverAuthorBooks(params: {
         image {
           url
         }
+        editions(
+          where: {
+            release_date: { _is_null: false }
+            _or: [
+              { language: { code2: { _eq: "en" } } }
+              { language_id: { _is_null: true } }
+            ]
+          }
+          order_by: { release_date: asc_nulls_last }
+          limit: 12
+        ) {
+          release_date
+          reading_format_id
+          edition_format
+        }
       }
     }
   `;
@@ -1527,6 +1605,7 @@ async function lookupBestGoogleBookMatch(params: {
     .replace(/"/g, '');
   if (!rawHead) return null;
 
+  const cleanAuthor = (authorName || '').replace(/"/g, '').trim();
   const normAuthor = normalizeAuthorKey(authorName || '');
   const authorTokens = normAuthor.split(' ').filter(Boolean);
   const lastAuthorToken = authorTokens[authorTokens.length - 1] || '';
@@ -1539,7 +1618,7 @@ async function lookupBestGoogleBookMatch(params: {
     try {
       const url = `${GOOGLE_BOOKS_ENDPOINT}?q=${encodeURIComponent(
         q
-      )}&maxResults=10&printType=books&langRestrict=en${keyParam}`;
+      )}&maxResults=20&printType=books&langRestrict=en${keyParam}`;
       const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return [];
       const json = await res.json();
@@ -1549,16 +1628,16 @@ async function lookupBestGoogleBookMatch(params: {
     }
   };
 
-  // Query by quoted phrase + author surname first so we see ALL editions (hardcover + paperback)
-  // without Google Books' intitle:"..." stop-word/apostrophe quirks dropping hits.
-  const primaryQuery = lastAuthorToken
-    ? `"${rawHead}" inauthor:${lastAuthorToken}`
+  // Query by quoted phrase + full author name first so single-word titles with common
+  // surnames (e.g. "Atmosphere" by Taylor Jenkins Reid) return all editions of that author's book.
+  const primaryQuery = cleanAuthor
+    ? `"${rawHead}" inauthor:"${cleanAuthor}"`
     : `"${rawHead}"`;
 
   let rawItems = await fetchVolumes(primaryQuery);
 
   const filterMatchingVolumes = (items: GoogleVolumeItem[]): BookItem[] => {
-    const out: BookItem[] = [];
+    const rawMatched: Array<{ item: BookItem; isSecondaryReissue: boolean }> = [];
     const nowIso = new Date().toISOString();
 
     for (const item of items) {
@@ -1581,10 +1660,11 @@ async function lookupBestGoogleBookMatch(params: {
       }
 
       const parsedDate = parseCatalogReleaseDate(info.publishedDate);
+      const isSecondaryReissue = isStrictSecondaryReissueTitle(fullTitle);
       if (
         parsedDate.releaseDate &&
         parsedDate.releaseDate > todayStr &&
-        isStrictSecondaryReissueTitle(fullTitle)
+        isSecondaryReissue
       ) {
         continue;
       }
@@ -1596,31 +1676,43 @@ async function lookupBestGoogleBookMatch(params: {
         (id) => id.type === 'ISBN_10'
       )?.identifier;
 
-      out.push({
-        id: `gb:book:${item.id}`,
-        source: 'google',
-        externalId: item.id,
-        title: pickGoogleVolumeDisplayTitle(info),
-        authorName: resolvedAuthor,
-        coverUrl: pickGoogleVolumeCoverUrl(info.imageLinks),
-        releaseDate: parsedDate.releaseDate,
-        datePrecision: parsedDate.datePrecision,
-        description: info.description || undefined,
-        pageCount: info.pageCount || undefined,
-        isbn: volIsbn13 || volIsbn10,
-        isOneOff: false,
-        isManual: false,
-        readingStatus: 'none',
-        updatedAt: nowIso,
+      rawMatched.push({
+        isSecondaryReissue,
+        item: {
+          id: `gb:book:${item.id}`,
+          source: 'google',
+          externalId: item.id,
+          title: pickGoogleVolumeDisplayTitle(info),
+          authorName: resolvedAuthor,
+          coverUrl: pickGoogleVolumeCoverUrl(info.imageLinks),
+          releaseDate: parsedDate.releaseDate,
+          datePrecision: parsedDate.datePrecision,
+          description: info.description || undefined,
+          pageCount: info.pageCount || undefined,
+          isbn: volIsbn13 || volIsbn10,
+          isOneOff: false,
+          isManual: false,
+          readingStatus: 'none',
+          updatedAt: nowIso,
+        },
       });
     }
-    return out;
+
+    const nonReissues = rawMatched.filter((x) => !x.isSecondaryReissue);
+    return (nonReissues.length > 0 ? nonReissues : rawMatched).map(
+      (x) => x.item
+    );
   };
 
   let candidates = filterMatchingVolumes(rawItems);
 
+  if (candidates.length === 0 && lastAuthorToken) {
+    rawItems = await fetchVolumes(`"${rawHead}" inauthor:${lastAuthorToken}`);
+    candidates = filterMatchingVolumes(rawItems);
+  }
+
   if (candidates.length === 0) {
-    const looseQuery = authorName ? `${rawHead} ${authorName}` : rawHead;
+    const looseQuery = cleanAuthor ? `${rawHead} ${cleanAuthor}` : rawHead;
     rawItems = await fetchVolumes(looseQuery);
     candidates = filterMatchingVolumes(rawItems);
   }
@@ -1790,7 +1882,7 @@ export async function fetchAuthorBibliography(params: {
     forceRefresh = false,
   } = params;
 
-  const bibCacheKey = `bib:v4:en:${source}::${externalId || ''}::${authorName
+  const bibCacheKey = `bib:v5:en:${source}::${externalId || ''}::${authorName
     .trim()
     .toLowerCase()}::${Boolean(hardcoverToken?.trim())}`;
   if (!forceRefresh) {
@@ -1991,9 +2083,13 @@ interface HardcoverEditionBatchNode {
     users_count?: number | null;
     image?: { url?: string | null } | null;
     editions?: Array<{
+      title?: string | null;
       release_date?: string | null;
       reading_format_id?: number | null;
       edition_format?: string | null;
+      edition_information?: string | null;
+      isbn_13?: string | null;
+      isbn_10?: string | null;
     }> | null;
     contributions?: Array<{
       author?: { id: number; name: string } | null;
@@ -2014,6 +2110,7 @@ export async function enrichBooksBatch(params: {
 }> {
   const { items, hardcoverToken, googleApiKey } = params;
   const matches: Record<string, BatchBookEnrichMatch> = {};
+  const pass1UsersCount = new Map<string, number>();
 
   if (items.length === 0) {
     return { matches };
@@ -2073,11 +2170,15 @@ export async function enrichBooksBatch(params: {
                     ]
                   }
                   order_by: { release_date: asc_nulls_last }
-                  limit: 6
+                  limit: 20
                 ) {
+                  title
                   release_date
                   reading_format_id
                   edition_format
+                  edition_information
+                  isbn_13
+                  isbn_10
                 }
                 contributions {
                   author {
@@ -2150,9 +2251,13 @@ export async function enrichBooksBatch(params: {
               ...(ed.release_date
                 ? [
                     {
+                      title: ed.title,
                       release_date: ed.release_date,
                       reading_format_id: ed.reading_format_id,
                       edition_format: ed.edition_format,
+                      edition_information: ed.edition_information,
+                      isbn_13: ed.isbn_13,
+                      isbn_10: ed.isbn_10,
                     },
                   ]
                 : []),
@@ -2169,6 +2274,10 @@ export async function enrichBooksBatch(params: {
               todayStr
             );
             const primaryAuthor = ed.book.contributions?.[0]?.author;
+            pass1UsersCount.set(
+              item.clientKey,
+              typeof ed.book.users_count === 'number' ? ed.book.users_count : 0
+            );
 
             matches[item.clientKey] = {
               clientKey: item.clientKey,
@@ -2191,17 +2300,29 @@ export async function enrichBooksBatch(params: {
       }
     }
 
-    // Pass 2: Aliased GraphQL Multi-Search for items without ISBN matches (e.g. Kindle editions or pasted lines)
-    const unmatched = items.filter((it) => !matches[it.clientKey]);
+    // Pass 2: Aliased GraphQL Multi-Search for unmatched items AND edition-decorated / standalone reissue ISBN stubs
+    // (e.g. "The City of Brass Deluxe Collector's Edition" or a standalone paperback book stub on Hardcover)
+    const needsHardcoverSearch = items.filter((it) => {
+      const m = matches[it.clientKey];
+      if (!m) return true;
+      if (hasEditionDecorationInTitle(it.title)) return true;
+      if (
+        (!m.releaseDate || m.releaseDate >= '2024') &&
+        (pass1UsersCount.get(it.clientKey) ?? 0) < 400
+      ) {
+        return true;
+      }
+      return false;
+    });
     const aliasChunkSize = 6;
 
-    for (let i = 0; i < unmatched.length; i += aliasChunkSize) {
-      const slice = unmatched.slice(i, i + aliasChunkSize);
+    for (let i = 0; i < needsHardcoverSearch.length; i += aliasChunkSize) {
+      const slice = needsHardcoverSearch.slice(i, i + aliasChunkSize);
       const varDefs = slice.map((_, idx) => `$q${idx}: String!`).join(', ');
       const aliasBlocks = slice
         .map(
           (_, idx) =>
-            `b${idx}: search(query: $q${idx}, query_type: "Book", per_page: 4, page: 1) { results }`
+            `b${idx}: search(query: $q${idx}, query_type: "Book", per_page: 6, page: 1) { results }`
         )
         .join('\n');
 
@@ -2235,7 +2356,6 @@ export async function enrichBooksBatch(params: {
 
         slice.forEach((item, idx) => {
           const allDocs = docsByAlias[idx];
-          // Prefer English records; only fall back to a translation if it's the sole match
           const englishDocs = englishIds
             ? allDocs.filter((d) => englishIds.has(String(d.id)))
             : allDocs;
@@ -2243,35 +2363,42 @@ export async function enrichBooksBatch(params: {
 
           if (docs.length === 0) return;
 
-          // Pick best match preferring canonical title + author match if authorName was given
-          let chosen = docs[0];
-          if (item.authorName) {
-            const canonicalMatch = docs.find((d) => {
-              const candAuthors = [
-                ...(d.author_names || []),
-                ...(d.contributions?.map((c) => c.author?.name || '') || []),
-              ].filter(Boolean);
-              return (
-                authorMatchesName(candAuthors, item.authorName!) &&
-                areSameCanonicalWork(
-                  { title: d.title || '', authorName: item.authorName! },
-                  { title: item.title, authorName: item.authorName! }
-                )
-              );
-            });
-            const authorMatch =
-              canonicalMatch ||
-              docs.find((d) => {
+          const canonicalDocs = item.authorName
+            ? docs.filter((d) => {
                 const candAuthors = [
                   ...(d.author_names || []),
                   ...(d.contributions?.map((c) => c.author?.name || '') || []),
                 ].filter(Boolean);
-                return authorMatchesName(candAuthors, item.authorName!);
-              });
-            if (authorMatch) {
-              chosen = authorMatch;
-            }
+                return (
+                  authorMatchesName(candAuthors, item.authorName!) &&
+                  areSameCanonicalWork(
+                    { title: d.title || '', authorName: item.authorName! },
+                    { title: item.title, authorName: item.authorName! }
+                  )
+                );
+              })
+            : [];
+
+          const existingPass1 = matches[item.clientKey];
+          if (existingPass1 && canonicalDocs.length === 0) {
+            return;
           }
+
+          const candidateDocs =
+            canonicalDocs.length > 0
+              ? canonicalDocs
+              : item.authorName
+              ? docs.filter((d) => {
+                  const candAuthors = [
+                    ...(d.author_names || []),
+                    ...(d.contributions?.map((c) => c.author?.name || '') || []),
+                  ].filter(Boolean);
+                  return authorMatchesName(candAuthors, item.authorName!);
+                })
+              : [docs[0]];
+
+          const chosen = candidateDocs[0] || docs[0];
+          if (!chosen) return;
 
           const primaryAuthor =
             chosen.contributions?.find((c) => c.primary)?.author ||
@@ -2281,57 +2408,141 @@ export async function enrichBooksBatch(params: {
             chosen.author_names?.[0] ||
             item.authorName ||
             'Unknown Author';
-          const chosenIdStr = String(chosen.id);
-          const coverUrl =
-            bestCovers?.get(chosenIdStr) || chosen.image?.url || undefined;
-          const metaDate = bestDates?.get(chosenIdStr);
-          const parsedDate =
-            metaDate && metaDate.datePrecision !== 'unknown'
-              ? metaDate
-              : parseHardcoverReleaseDate(
-                  chosen.release_date,
-                  chosen.release_year
-                );
 
-          matches[item.clientKey] = {
-            clientKey: item.clientKey,
-            id: `hc:book:${chosen.id}`,
-            source: 'hardcover',
-            externalId: String(chosen.id),
-            title: cleanDisplayBookTitle(chosen.title || item.title),
-            authorName: resolvedAuthor,
-            authorExternalId:
-              primaryAuthor?.id !== undefined
-                ? String(primaryAuthor.id)
-                : undefined,
-            coverUrl,
-            releaseDate: parsedDate.releaseDate,
-            datePrecision: parsedDate.datePrecision,
-            pageCount: chosen.pages || undefined,
-            isbn:
-              chosen.isbns?.find((x) => x.length === 13) ||
-              item.isbn13 ||
-              item.isbn10,
+          const resolveDocDate = (doc: HardcoverSearchBookDoc) => {
+            const idStr = String(doc.id);
+            const md = bestDates?.get(idStr);
+            return md && md.datePrecision !== 'unknown'
+              ? md
+              : parseHardcoverReleaseDate(doc.release_date, doc.release_year);
           };
+
+          let mergedDate = resolveDocDate(chosen);
+          let mergedTitle = cleanDisplayBookTitle(chosen.title || item.title);
+          let mergedCover =
+            bestCovers?.get(String(chosen.id)) || chosen.image?.url || undefined;
+
+          // Merge across all canonical search hits so an earlier standard hardcover beats a Deluxe/paperback duplicate record
+          for (let k = 1; k < canonicalDocs.length; k++) {
+            const alt = canonicalDocs[k];
+            const altDate = resolveDocDate(alt);
+            mergedDate = pickCanonicalReleaseDate(
+              {
+                id: `hc:book:${chosen.id}`,
+                source: 'hardcover',
+                title: mergedTitle,
+                authorName: resolvedAuthor,
+                releaseDate: mergedDate.releaseDate,
+                datePrecision: mergedDate.datePrecision,
+                isOneOff: false,
+                isManual: false,
+                readingStatus: 'none',
+                updatedAt: '',
+              },
+              {
+                id: `hc:book:${alt.id}`,
+                source: 'hardcover',
+                title: alt.title || mergedTitle,
+                authorName: resolvedAuthor,
+                releaseDate: altDate.releaseDate,
+                datePrecision: altDate.datePrecision,
+                isOneOff: false,
+                isManual: false,
+                readingStatus: 'none',
+                updatedAt: '',
+              },
+              todayStr
+            );
+            mergedTitle = pickCleanerTitle(mergedTitle, alt.title || mergedTitle);
+            if (!mergedCover) {
+              mergedCover =
+                bestCovers?.get(String(alt.id)) || alt.image?.url || undefined;
+            }
+          }
+
+          if (existingPass1) {
+            const combined = pickCanonicalReleaseDate(
+              {
+                id: existingPass1.id,
+                source: existingPass1.source,
+                title: existingPass1.title,
+                authorName: existingPass1.authorName,
+                releaseDate: existingPass1.releaseDate,
+                datePrecision: existingPass1.datePrecision,
+                isOneOff: false,
+                isManual: false,
+                readingStatus: 'none',
+                updatedAt: '',
+              },
+              {
+                id: `hc:book:${chosen.id}`,
+                source: 'hardcover',
+                title: mergedTitle,
+                authorName: resolvedAuthor,
+                releaseDate: mergedDate.releaseDate,
+                datePrecision: mergedDate.datePrecision,
+                isOneOff: false,
+                isManual: false,
+                readingStatus: 'none',
+                updatedAt: '',
+              },
+              todayStr
+            );
+            matches[item.clientKey] = {
+              ...existingPass1,
+              title: pickCleanerTitle(existingPass1.title, mergedTitle),
+              coverUrl: existingPass1.coverUrl || mergedCover,
+              releaseDate: combined.releaseDate,
+              datePrecision: combined.datePrecision,
+              pageCount: existingPass1.pageCount || chosen.pages || undefined,
+              isbn:
+                existingPass1.isbn ||
+                chosen.isbns?.find((x) => x.length === 13) ||
+                item.isbn13 ||
+                item.isbn10,
+            };
+          } else {
+            matches[item.clientKey] = {
+              clientKey: item.clientKey,
+              id: `hc:book:${chosen.id}`,
+              source: 'hardcover',
+              externalId: String(chosen.id),
+              title: mergedTitle,
+              authorName: resolvedAuthor,
+              authorExternalId:
+                primaryAuthor?.id !== undefined
+                  ? String(primaryAuthor.id)
+                  : undefined,
+              coverUrl: mergedCover,
+              releaseDate: mergedDate.releaseDate,
+              datePrecision: mergedDate.datePrecision,
+              pageCount: chosen.pages || undefined,
+              isbn:
+                chosen.isbns?.find((x) => x.length === 13) ||
+                item.isbn13 ||
+                item.isbn10,
+            };
+          }
         });
       } catch {
         // Ignore transient batch search error
       }
 
-      if (i + aliasChunkSize < unmatched.length) {
-        await sleepMs(160);
+      if (i + aliasChunkSize < needsHardcoverSearch.length) {
+        await sleepMs(120);
       }
     }
   }
 
   // Pass 3: Google Books hybrid verification & fallback
-  // Runs on unmatched items, items missing exact 'day' dates (e.g. TBA / year-only / 01-01 placeholders),
-  // and 2026+ releases (to catch 2025 hardcovers whose ISBN or Hardcover entry was bumped to a 2026 paperback).
+  // Runs on unmatched items, items missing exact 'day' dates, edition-decorated titles,
+  // and 2024+ releases (catching 2025 hardcovers bumped to late-2025/2026 paperbacks or reissues).
   const needsGoogleVerify = items.filter((it) => {
     const m = matches[it.clientKey];
     if (!m) return true;
     if (m.datePrecision !== 'day' || !m.releaseDate) return true;
-    if (m.releaseDate >= '2026') return true;
+    if (hasEditionDecorationInTitle(it.title)) return true;
+    if (m.releaseDate >= '2024') return true;
     return false;
   });
 
@@ -2392,19 +2603,23 @@ export async function enrichBooksBatch(params: {
       })
     );
     if (i + googleChunkSize < needsGoogleVerify.length) {
-      await sleepMs(100);
+      await sleepMs(80);
     }
   }
 
-  // Pass 4: OpenLibrary first_publish_year fallback for backlist / library MARC / indie titles
-  // that still have no publication date after Hardcover + Google Books.
-  const stillMissingDates = items.filter(
-    (it) => !matches[it.clientKey]?.releaseDate
-  );
+  // Pass 4: OpenLibrary first_publish_year fallback for undated backlist / MARC titles
+  // AND multi-year special/deluxe reissues (e.g. a 2025 Deluxe Collector's Edition of a 2017 novel).
+  const needsOpenLibraryCheck = items.filter((it) => {
+    const m = matches[it.clientKey];
+    if (!m?.releaseDate) return true;
+    if (hasEditionDecorationInTitle(it.title)) return true;
+    if (m.releaseDate >= '2025') return true;
+    return false;
+  });
   const olChunkSize = 8;
 
-  for (let i = 0; i < stillMissingDates.length; i += olChunkSize) {
-    const slice = stillMissingDates.slice(i, i + olChunkSize);
+  for (let i = 0; i < needsOpenLibraryCheck.length; i += olChunkSize) {
+    const slice = needsOpenLibraryCheck.slice(i, i + olChunkSize);
     await Promise.all(
       slice.map(async (item) => {
         try {
@@ -2460,13 +2675,14 @@ export async function enrichBooksBatch(params: {
               continue;
             }
 
-            const yr =
+            const yrNum =
               typeof doc.first_publish_year === 'number' &&
               doc.first_publish_year >= 1800 &&
               doc.first_publish_year <= 2100
-                ? String(doc.first_publish_year)
-                : undefined;
-            if (!yr) continue;
+                ? doc.first_publish_year
+                : null;
+            if (!yrNum) continue;
+            const yr = String(yrNum);
 
             const olCover = doc.cover_i
               ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
@@ -2489,7 +2705,7 @@ export async function enrichBooksBatch(params: {
                 datePrecision: 'year',
                 isbn: olIsbn || item.isbn13 || item.isbn10,
               };
-            } else {
+            } else if (!existing.releaseDate) {
               matches[item.clientKey] = {
                 ...existing,
                 title: pickCleanerTitle(
@@ -2501,6 +2717,23 @@ export async function enrichBooksBatch(params: {
                 datePrecision: 'year',
                 isbn: existing.isbn || olIsbn,
               };
+            } else {
+              // If OpenLibrary's canonical work first_publish_year is at least 2 full years earlier
+              // (e.g. 2017 vs a 2025 Deluxe Collector's Edition), restore the original publication year!
+              const existingYear = Number(existing.releaseDate.slice(0, 4));
+              if (existingYear >= 2000 && yrNum <= existingYear - 2) {
+                matches[item.clientKey] = {
+                  ...existing,
+                  title: pickCleanerTitle(
+                    existing.title,
+                    cleanDisplayBookTitle(doc.title)
+                  ),
+                  coverUrl: existing.coverUrl || olCover,
+                  releaseDate: yr,
+                  datePrecision: 'year',
+                  isbn: existing.isbn || olIsbn,
+                };
+              }
             }
             break;
           }
@@ -2509,8 +2742,8 @@ export async function enrichBooksBatch(params: {
         }
       })
     );
-    if (i + olChunkSize < stillMissingDates.length) {
-      await sleepMs(100);
+    if (i + olChunkSize < needsOpenLibraryCheck.length) {
+      await sleepMs(80);
     }
   }
 

@@ -5,6 +5,8 @@ import {
   resolveAuthorsBatch,
 } from '@/lib/bookProviders';
 
+export const maxDuration = 60;
+
 export async function POST(request: NextRequest) {
   const headerToken = request.headers.get('x-hardcover-token')?.trim();
   const hardcoverToken = headerToken || process.env.HARDCOVER_API_KEY?.trim();

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { fetchAuthorBibliography } from '@/lib/bookProviders';
 import { DataSource } from '@/types/books';
 
+export const maxDuration = 60;
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const authorId = searchParams.get('authorId')?.trim() || '';
