@@ -1,0 +1,304 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Folio — "Paper & Ink" design tokens.
+ * Light theme: ivory laid paper, iron-gall ink, oxblood bookbinding accent.
+ * Dark theme: the same library by lamplight.
+ */
+@layer base {
+  :root {
+    --paper: 247 242 233;
+    --paper-raised: 252 249 243;
+    --paper-sunken: 238 231 218;
+
+    --ink: 30 25 20;
+    --ink-soft: 70 61 51;
+    --ink-muted: 119 108 93;
+    --ink-faint: 163 152 136;
+
+    --rule: 223 213 197;
+    --rule-strong: 191 178 158;
+
+    --claret: 124 33 38;
+    --claret-deep: 94 23 28;
+    --claret-wash: 244 230 224;
+
+    --gilt: 150 113 50;
+    --gilt-wash: 242 233 214;
+
+    --moss: 62 89 57;
+    --moss-wash: 229 234 222;
+
+    --inverse: 30 25 20;
+    --inverse-ink: 247 242 233;
+
+    --shadow: 64 42 22;
+
+    --grain-opacity: 0.055;
+    color-scheme: light;
+  }
+
+  .dark {
+    --paper: 23 20 17;
+    --paper-raised: 31 27 23;
+    --paper-sunken: 17 15 13;
+
+    --ink: 236 227 211;
+    --ink-soft: 203 192 174;
+    --ink-muted: 152 141 124;
+    --ink-faint: 106 97 85;
+
+    --rule: 54 48 41;
+    --rule-strong: 82 74 63;
+
+    --claret: 216 134 120;
+    --claret-deep: 234 166 152;
+    --claret-wash: 52 31 28;
+
+    --gilt: 206 172 108;
+    --gilt-wash: 46 39 27;
+
+    --moss: 154 182 138;
+    --moss-wash: 33 41 31;
+
+    --inverse: 236 227 211;
+    --inverse-ink: 23 20 17;
+
+    --shadow: 0 0 0;
+
+    --grain-opacity: 0.035;
+    color-scheme: dark;
+  }
+
+  html {
+    -webkit-tap-highlight-color: transparent;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply font-sans text-ink;
+    background-color: rgb(var(--paper));
+    font-feature-settings: 'kern' 1, 'liga' 1;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Laid-paper grain, fixed so it reads as the page rather than the content */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    opacity: var(--grain-opacity);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.25  0 0 0 0 0.18  0 0 0 0 0.1  0 0 0 1 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+
+  .dark body::before {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 0.92  0 0 0 0 0.8  0 0 0 1 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+
+  ::selection {
+    background: rgb(var(--claret) / 0.18);
+    color: rgb(var(--ink));
+  }
+
+  :focus-visible {
+    outline: 1px solid rgb(var(--claret));
+    outline-offset: 3px;
+  }
+
+  input[type='search']::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+  }
+
+  input[type='date']::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
+  }
+
+  .dark input[type='date']::-webkit-calendar-picker-indicator {
+    filter: invert(0.85);
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--rule-strong)) transparent;
+  }
+}
+
+@layer components {
+  /* ---------- Typography ---------- */
+  .caps {
+    @apply font-sans uppercase;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    line-height: 1.3;
+  }
+
+  .caps-sm {
+    @apply font-sans uppercase;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    line-height: 1.3;
+  }
+
+  .nums-old {
+    font-variant-numeric: oldstyle-nums proportional-nums;
+  }
+
+  .nums-lining {
+    font-variant-numeric: lining-nums tabular-nums;
+  }
+
+  .book-title {
+    @apply font-serif text-ink;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    line-height: 1.2;
+  }
+
+  .byline {
+    @apply font-serif italic text-ink-soft;
+  }
+
+  /* ---------- Rules & ornaments ---------- */
+  .rule-double {
+    border-top: 3px double rgb(var(--rule-strong));
+  }
+
+  .rule-hair {
+    border-top: 1px solid rgb(var(--rule));
+  }
+
+  /* ---------- Buttons ---------- */
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap border font-sans transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-45;
+    height: 2.25rem;
+    padding: 0 1rem;
+    font-size: 12.5px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+    border-radius: 2px;
+  }
+
+  .btn-sm {
+    height: 1.875rem;
+    padding: 0 0.7rem;
+    font-size: 12px;
+  }
+
+  .btn-primary {
+    @apply border-ink bg-ink text-paper hover:border-claret hover:bg-claret;
+  }
+
+  .dark .btn-primary {
+    @apply hover:text-paper;
+  }
+
+  .btn-outline {
+    @apply border-rule-strong bg-transparent text-ink hover:border-ink;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-ink-muted hover:text-ink;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  .btn-danger {
+    @apply border-transparent bg-transparent text-ink-muted hover:text-claret;
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  .icon-btn {
+    @apply inline-flex h-8 w-8 items-center justify-center text-ink-muted transition-colors hover:text-ink;
+    border-radius: 2px;
+  }
+
+  /* Quiet text action used on catalogue entries */
+  .entry-action {
+    @apply inline-flex items-center gap-1.5 font-sans text-ink-muted transition-colors hover:text-ink;
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+  }
+
+  .entry-action[data-active='true'] {
+    @apply text-claret;
+  }
+
+  .link {
+    @apply text-ink underline decoration-rule-strong decoration-1 underline-offset-[3px] transition-colors hover:decoration-claret;
+  }
+
+  /* ---------- Form fields ---------- */
+  .field {
+    @apply w-full border border-rule bg-paper-raised px-3 py-2.5 font-serif text-[16px] text-ink transition-colors placeholder:italic placeholder:text-ink-faint focus:border-ink focus:outline-none disabled:opacity-60;
+    border-radius: 2px;
+  }
+
+  .field-sm {
+    @apply py-1.5 text-[15px];
+  }
+
+  select.field {
+    -webkit-appearance: none;
+    appearance: none;
+    padding-right: 2.25rem;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23887B6A' stroke-width='1.2'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.85rem center;
+  }
+
+  input[type='date'].field,
+  input[type='number'].field {
+    @apply font-sans text-[14px];
+  }
+
+  .field-label {
+    @apply caps mb-1.5 block text-ink-muted;
+  }
+
+  /* ---------- Surfaces ---------- */
+  .panel {
+    @apply border border-rule bg-paper-raised;
+    border-radius: 2px;
+  }
+
+  .tag {
+    @apply caps-sm inline-flex items-center gap-1 border border-rule px-1.5 py-[3px] text-ink-muted;
+    border-radius: 2px;
+  }
+
+  .tag-claret {
+    @apply border-claret/30 text-claret;
+  }
+
+  .tag-moss {
+    @apply border-moss/30 text-moss;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .text-pretty {
+    text-wrap: pretty;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
