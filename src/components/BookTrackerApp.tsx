@@ -1447,28 +1447,33 @@ export function BookTrackerApp() {
       if (data.id) {
         setState((prev) => ({
           ...prev,
-          books: prev.books.map((b) =>
-            b.id === data.id
-              ? {
-                  ...b,
-                  title: data.title,
-                  authorName: data.authorName,
-                  authorId: data.authorId,
-                  coverUrl: data.coverUrl,
-                  releaseDate: parsedDate.releaseDate,
-                  datePrecision: parsedDate.datePrecision,
-                  isOneOff: data.isOneOff,
-                  readingStatus: data.readingStatus,
-                  addedToTodoAt:
-                    data.readingStatus === 'todo'
-                      ? b.addedToTodoAt || nowIso
-                      : undefined,
-                  finishedAt:
-                    data.readingStatus === 'read' ? data.finishedAt : undefined,
-                  updatedAt: nowIso,
-                }
-              : b
-          ),
+          books: prev.books.map((b) => {
+            if (b.id !== data.id) return b;
+            const userEditedBiblio =
+              data.title !== b.title ||
+              data.authorName !== b.authorName ||
+              parsedDate.releaseDate !== b.releaseDate ||
+              parsedDate.datePrecision !== b.datePrecision;
+            return {
+              ...b,
+              title: data.title,
+              authorName: data.authorName,
+              authorId: data.authorId,
+              coverUrl: data.coverUrl,
+              releaseDate: parsedDate.releaseDate,
+              datePrecision: parsedDate.datePrecision,
+              isOneOff: data.isOneOff,
+              isManual: Boolean(b.isManual || userEditedBiblio),
+              readingStatus: data.readingStatus,
+              addedToTodoAt:
+                data.readingStatus === 'todo'
+                  ? b.addedToTodoAt || nowIso
+                  : undefined,
+              finishedAt:
+                data.readingStatus === 'read' ? data.finishedAt : undefined,
+              updatedAt: nowIso,
+            };
+          }),
         }));
         showToast(`Updated "${data.title}"`);
       } else {
@@ -2145,6 +2150,11 @@ export function BookTrackerApp() {
             onToggleRead={handleToggleRead}
             onOpenReadDetails={(book) => setReadLogBook(book)}
             onEditBook={(book) => setBookModalState({ open: true, book })}
+            onRemoveOrHideBook={handleRemoveOrHideBook}
+            onSelectAuthor={(authorId) => {
+              setReleasedAuthorFilter(authorId);
+              setActiveTab('released');
+            }}
             onOpenChallengeModal={(year, existing) =>
               setChallengeModalState({ open: true, year, existing })
             }
@@ -2293,6 +2303,11 @@ export function BookTrackerApp() {
           book={readLogBook}
           todayStr={todayStr}
           onClose={() => setReadLogBook(null)}
+          onEditBookDetails={() => {
+            const target = readLogBook;
+            setReadLogBook(null);
+            setBookModalState({ open: true, book: target });
+          }}
           onSave={handleSaveReadDetails}
         />
       )}

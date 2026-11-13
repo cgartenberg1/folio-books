@@ -29,7 +29,7 @@ import {
   markCustomCoverUrl,
   stripCustomCoverMarker,
 } from '@/lib/coverArt';
-import { parseReleaseDateInput } from '@/lib/dates';
+import { formatReleaseDate, parseReleaseDateInput } from '@/lib/dates';
 import { canOpenVellumWebUrl } from '@/lib/vellumBridge';
 import {
   AppSettings,
@@ -717,6 +717,7 @@ interface ReadLogModalProps {
   book: BookItem;
   todayStr: string;
   onClose: () => void;
+  onEditBookDetails?: () => void;
   onSave: (updates: {
     finishedAt?: string;
     rating?: number;
@@ -728,14 +729,28 @@ export function ReadLogModal({
   book,
   todayStr,
   onClose,
+  onEditBookDetails,
   onSave,
 }: ReadLogModalProps) {
   const [hasFinishDate, setHasFinishDate] = useState<boolean>(
     book.finishedAt !== undefined ? Boolean(book.finishedAt) : true
   );
-  const [finishedAt, setFinishedAt] = useState(book.finishedAt || todayStr);
+  const [finishedAt, setFinishedAt] = useState(
+    book.finishedAt && /^\d{4}-\d{2}-\d{2}$/.test(book.finishedAt)
+      ? book.finishedAt
+      : book.finishedAt && /^\d{4}$/.test(book.finishedAt)
+      ? `${book.finishedAt}-01-01`
+      : todayStr
+  );
   const [rating, setRating] = useState<number>(book.rating || 0);
   const [notes, setNotes] = useState(book.notes || '');
+
+  const canUseReleaseDay = Boolean(
+    book.releaseDate &&
+      book.datePrecision === 'day' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(book.releaseDate) &&
+      book.releaseDate <= todayStr
+  );
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -748,7 +763,7 @@ export function ReadLogModal({
 
   return (
     <ModalShell
-      title="Notes on a book"
+      title="Reading log & finish date"
       subtitle={`${book.title} · ${book.authorName}`}
       onClose={onClose}
     >
@@ -770,7 +785,7 @@ export function ReadLogModal({
                   : 'border-rule bg-paper-raised text-ink-muted hover:border-ink hover:text-ink'
               }`}
             >
-              Count for Year Challenge
+              Exact Finish Date
             </button>
             <button
               type="button"
@@ -786,12 +801,41 @@ export function ReadLogModal({
           </div>
 
           {hasFinishDate && (
-            <input
-              type="date"
-              value={finishedAt}
-              onChange={(e) => setFinishedAt(e.target.value)}
-              className="field mt-2"
-            />
+            <div className="space-y-2 pt-1">
+              <input
+                type="date"
+                value={finishedAt}
+                onChange={(e) => setFinishedAt(e.target.value)}
+                className="field"
+              />
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="caps-sm text-ink-faint">Quick set:</span>
+                <button
+                  type="button"
+                  onClick={() => setFinishedAt(todayStr)}
+                  className={`border px-2 py-0.5 font-sans text-[11px] transition-colors ${
+                    finishedAt === todayStr
+                      ? 'border-claret bg-claret-wash text-claret'
+                      : 'border-rule bg-paper-raised text-ink-muted hover:border-ink hover:text-ink'
+                  }`}
+                >
+                  Today
+                </button>
+                {canUseReleaseDay && book.releaseDate && (
+                  <button
+                    type="button"
+                    onClick={() => setFinishedAt(book.releaseDate!)}
+                    className={`border px-2 py-0.5 font-sans text-[11px] transition-colors ${
+                      finishedAt === book.releaseDate
+                        ? 'border-claret bg-claret-wash text-claret'
+                        : 'border-rule bg-paper-raised text-ink-muted hover:border-ink hover:text-ink'
+                    }`}
+                  >
+                    Release day ({formatReleaseDate(book.releaseDate, 'day')})
+                  </button>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
@@ -838,20 +882,33 @@ export function ReadLogModal({
           />
         </div>
 
-        <div className="flex justify-end gap-2 pt-5 border-t border-rule">
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn btn-ghost"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="btn btn-primary"
-          >
-            Save Log
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-5 border-t border-rule">
+          {onEditBookDetails ? (
+            <button
+              type="button"
+              onClick={onEditBookDetails}
+              className="btn btn-ghost btn-sm text-ink-muted hover:text-ink"
+            >
+              Edit book details &amp; cover…
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="btn btn-ghost"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary"
+            >
+              Save Log
+            </button>
+          </div>
         </div>
       </form>
     </ModalShell>

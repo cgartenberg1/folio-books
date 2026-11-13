@@ -204,14 +204,62 @@ export function BookCard({
           </div>
         )}
 
-        {isRead && (book.rating || book.finishedAt) && (
+        {isRead && (book.rating || book.finishedAt || onOpenReadDetails) && (
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-            {book.rating ? <Rating value={book.rating} /> : null}
-            {book.finishedAt && (
-              <span className="font-serif text-[14px] italic text-ink-muted">
-                Finished {formatReleaseDate(book.finishedAt, 'day')}
-              </span>
-            )}
+            {book.rating ? (
+              onOpenReadDetails ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenReadDetails(book)}
+                  title="Edit rating, finish date, or notes"
+                  className="transition-opacity hover:opacity-80"
+                >
+                  <Rating value={book.rating} />
+                </button>
+              ) : (
+                <Rating value={book.rating} />
+              )
+            ) : null}
+            {book.finishedAt ? (
+              onOpenReadDetails ? (
+                <button
+                  type="button"
+                  onClick={() => onOpenReadDetails(book)}
+                  title="Click to edit date finished"
+                  className="font-serif text-[14px] italic text-ink-muted decoration-claret/50 underline-offset-4 transition-colors hover:text-claret hover:underline"
+                >
+                  Finished{' '}
+                  {formatReleaseDate(
+                    book.finishedAt,
+                    book.finishedAt.length === 4
+                      ? 'year'
+                      : book.finishedAt.length === 7
+                      ? 'month'
+                      : 'day'
+                  )}
+                </button>
+              ) : (
+                <span className="font-serif text-[14px] italic text-ink-muted">
+                  Finished{' '}
+                  {formatReleaseDate(
+                    book.finishedAt,
+                    book.finishedAt.length === 4
+                      ? 'year'
+                      : book.finishedAt.length === 7
+                      ? 'month'
+                      : 'day'
+                  )}
+                </span>
+              )
+            ) : onOpenReadDetails ? (
+              <button
+                type="button"
+                onClick={() => onOpenReadDetails(book)}
+                className="font-serif text-[13.5px] italic text-ink-faint decoration-claret/50 underline-offset-4 transition-colors hover:text-claret hover:underline"
+              >
+                No finish date · Set date
+              </button>
+            ) : null}
           </div>
         )}
 
@@ -255,7 +303,9 @@ export function BookCard({
               className="entry-action"
             >
               <PenLine strokeWidth={1.5} className="h-3.5 w-3.5" />
-              {book.rating || book.notes ? 'Edit notes' : 'Rate & annotate'}
+              {book.finishedAt || book.rating || book.notes
+                ? 'Edit date & log'
+                : 'Set date & rate'}
             </button>
           )}
 
