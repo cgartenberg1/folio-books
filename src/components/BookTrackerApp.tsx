@@ -35,6 +35,7 @@ import {
   consolidateDuplicateBooks,
   getCanonicalWorkKey,
 } from '@/lib/bookDedupe';
+import { isCustomCoverUrl } from '@/lib/coverArt';
 import { buildDemoLibrary } from '@/lib/demoLibrary';
 import { format, parseISO } from 'date-fns';
 import {
@@ -639,7 +640,10 @@ export function BookTrackerApp() {
               nextBooksMap.set(matched.id, {
                 ...matched,
                 authorId: matched.authorId || author.id,
-                coverUrl: matched.coverUrl || incoming.coverUrl,
+                coverUrl: isCustomCoverUrl(matched.coverUrl)
+                  ? matched.coverUrl
+                  : incoming.coverUrl || matched.coverUrl,
+                isbn: matched.isbn || incoming.isbn,
                 releaseDate:
                   matched.isManual && matched.releaseDate && !isVellumAutoEntry
                     ? matched.releaseDate
@@ -1980,6 +1984,7 @@ export function BookTrackerApp() {
           authors={state.authors}
           todayStr={todayStr}
           defaultAuthorId={bookModalState.defaultAuthorId}
+          hardcoverToken={settings.hardcoverToken}
           onClose={() => setBookModalState({ open: false })}
           onSave={handleSaveBookModal}
         />

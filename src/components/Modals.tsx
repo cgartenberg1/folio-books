@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   Check,
@@ -9,16 +9,26 @@ import {
   Database,
   Download,
   ExternalLink,
+  ImagePlus,
   KeyRound,
   RefreshCw,
+  Search,
   Star,
+  Trash2,
   Upload,
   X,
 } from 'lucide-react';
+import { BookCover } from '@/components/BookCover';
 import {
   CloudConnectionConfig,
   fetchOrRotateVellumBridgeToken,
 } from '@/lib/cloudSync';
+import {
+  compressUploadedCoverImage,
+  isCustomCoverUrl,
+  markCustomCoverUrl,
+  stripCustomCoverMarker,
+} from '@/lib/coverArt';
 import { parseReleaseDateInput } from '@/lib/dates';
 import { canOpenVellumWebUrl } from '@/lib/vellumBridge';
 import {
@@ -87,6 +97,7 @@ interface BookFormModalProps {
   authors: FollowedAuthor[];
   todayStr: string;
   defaultAuthorId?: string;
+  hardcoverToken?: string;
   onClose: () => void;
   onSave: (bookData: {
     id?: string;
@@ -101,11 +112,18 @@ interface BookFormModalProps {
   }) => void;
 }
 
+interface CoverCandidateItem {
+  url: string;
+  label: string;
+  source: string;
+}
+
 export function BookFormModal({
   initialBook,
   authors,
   todayStr,
   defaultAuthorId,
+  hardcoverToken,
   onClose,
   onSave,
 }: BookFormModalProps) {
@@ -124,6 +142,19 @@ export function BookFormModal({
     initialBook?.releaseDate || ''
   );
   const [coverUrl, setCoverUrl] = useState(initialBook?.coverUrl || '');
+  const [coverTouched, setCoverTouched] = useState(false);
+  const [isUploadingCover, setIsUploadingCover] = useState(false);
+  const [coverError, setCoverError] = useState<string | null>(null);
+  const [isDraggingCover, setIsDraggingCover] = useState(false);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
+  const [candidatesLoaded, setCandidatesLoaded] = useState(false);
+  const [coverCandidates, setCoverCandidates] = useState<CoverCandidateItem[]>([]);
+  const [failedCandidateUrls, setFailedCandidateUrls] = useState<Set<string>>(
+    () => new Set()
+  );
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [readingStatus, setReadingStatus] = useState<ReadingStatus>(
     initialBook?.readingStatus || 'none'
   );
@@ -138,16 +169,76 @@ export function BookFormModal({
     }
   }, [selectedAuthorId, authors]);
 
+  const handleImportCoverBlob = async (blob: Blob) => {
+    setCoverError(null);
+    setIsUploadingCover(true);
+    try {
+      const compressedDataUrl = await compressUploadedCoverImage(blob);
+      setCoverUrl(compressedDataUrl);
+      setCoverTouched(true);
+    } catch (err) {
+      setCoverError(
+        err instanceof Error ? err.message : 'Could not import cover image.'
+      );
+    } finally {
+      setIsUploadingCover(false);
+    }
+  };
+
+  const handleBrowseCovers = async () => {
+    if (!title.trim() || isLoadingCandidates) return;
+    setCoverError(null);
+    setIsLoadingCandidates(true);
+    try {
+      const params = new URLSearchParams({
+        title: title.trim(),
+        author: authorName.trim(),
+      });
+      if (initialBook?.isbn) params.set('isbn', initialBook.isbn);
+      if (initialBook?.externalId) params.set('externalId', initialBook.externalId);
+      if (initialBook?.source) params.set('source', initialBook.source);
+
+      const headers: Record<string, string> = {};
+      if (hardcoverToken?.trim()) {
+        headers['x-hardcover-token'] = hardcoverToken.trim();
+      }
+
+      const res = await fetch(`/api/books/covers?${params.toString()}`, {
+        headers,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not search cover editions');
+      }
+      setCoverCandidates(data.covers || []);
+      setCandidatesLoaded(true);
+    } catch (err) {
+      setCoverError(
+        err instanceof Error ? err.message : 'Could not search cover editions.'
+      );
+    } finally {
+      setIsLoadingCandidates(false);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !authorName.trim()) return;
+
+    const trimmedCover = coverUrl.trim();
+    const resolvedCoverUrl = !trimmedCover
+      ? undefined
+      : coverTouched || !initialBook || isCustomCoverUrl(trimmedCover)
+      ? markCustomCoverUrl(trimmedCover)
+      : trimmedCover;
+
     onSave({
       id: initialBook?.id,
       title: title.trim(),
       authorName: authorName.trim(),
       authorId: selectedAuthorId || undefined,
       releaseDateInput: releaseDateInput.trim(),
-      coverUrl: coverUrl.trim() || undefined,
+      coverUrl: resolvedCoverUrl,
       isOneOff: selectedAuthorId ? Boolean(initialBook?.isOneOff) : true,
       readingStatus,
       finishedAt: readingStatus === 'read' ? finishedAt || undefined : undefined,
@@ -155,18 +246,39 @@ export function BookFormModal({
   };
 
   const parsedPreview = parseReleaseDateInput(releaseDateInput);
+  const isUploadedDataUrl = coverUrl.trim().startsWith('data:image/');
+  const cleanUrlInputValue = isUploadedDataUrl
+    ? ''
+    : stripCustomCoverMarker(coverUrl) || '';
+  const visibleCandidates = coverCandidates.filter(
+    (c) => !failedCandidateUrls.has(c.url)
+  );
 
   return (
     <ModalShell
       title={initialBook ? 'Edit details' : 'Add a book by hand'}
       subtitle={
         initialBook
-          ? 'Correct the date, the cover, or where it stands on your list'
+          ? 'Correct the date, swap or import cover artwork, or update your list'
           : 'For announced titles the catalogues haven’t caught up with yet'
       }
       onClose={onClose}
     >
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form
+        onSubmit={handleSubmit}
+        onPaste={(e) => {
+          const items = Array.from(e.clipboardData?.items || []);
+          const imageItem = items.find((item) => item.type.startsWith('image/'));
+          if (imageItem) {
+            const blob = imageItem.getAsFile();
+            if (blob) {
+              e.preventDefault();
+              void handleImportCoverBlob(blob);
+            }
+          }
+        }}
+        className="space-y-4"
+      >
         <div>
           <label className="field-label">
             Title
@@ -249,17 +361,195 @@ export function BookFormModal({
           </div>
         </div>
 
-        <div>
-          <label className="field-label">
-            Cover image URL · optional
-          </label>
-          <input
-            type="url"
-            value={coverUrl}
-            onChange={(e) => setCoverUrl(e.target.value)}
-            placeholder="https://..."
-            className="field"
-          />
+        {/* Cover Artwork Studio: upload/drop/paste custom art, browse flat editions, or paste URL */}
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsDraggingCover(true);
+          }}
+          onDragLeave={() => setIsDraggingCover(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDraggingCover(false);
+            const droppedFile = e.dataTransfer?.files?.[0];
+            if (droppedFile) {
+              void handleImportCoverBlob(droppedFile);
+            }
+          }}
+          className={`panel p-3.5 transition-colors ${
+            isDraggingCover ? 'border-claret bg-claret-wash/30' : ''
+          }`}
+        >
+          <div className="flex items-start gap-4">
+            <BookCover
+              title={title || 'Untitled'}
+              authorName={authorName || 'Author'}
+              coverUrl={coverUrl || undefined}
+              size="lg"
+            />
+
+            <div className="min-w-0 flex-1 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="caps text-ink-muted">Cover artwork</label>
+                {(isUploadedDataUrl || isCustomCoverUrl(coverUrl)) && (
+                  <span className="tag tag-claret">Custom cover</span>
+                )}
+              </div>
+
+              <p className="font-serif text-[13.5px] italic leading-snug text-ink-muted">
+                Upload or drop an image file, paste an image from your clipboard, or pick a flat head-on edition below.
+              </p>
+
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    void handleImportCoverBlob(file);
+                  }
+                  e.target.value = '';
+                }}
+              />
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isUploadingCover}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="btn btn-outline btn-sm"
+                >
+                  <ImagePlus strokeWidth={1.5} className="h-3.5 w-3.5" />
+                  {isUploadingCover ? 'Importing…' : 'Upload image'}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!title.trim() || isLoadingCandidates}
+                  onClick={handleBrowseCovers}
+                  className="btn btn-outline btn-sm"
+                >
+                  {isLoadingCandidates ? (
+                    <RefreshCw strokeWidth={1.5} className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Search strokeWidth={1.5} className="h-3.5 w-3.5" />
+                  )}
+                  {isLoadingCandidates ? 'Searching…' : 'Browse flat covers'}
+                </button>
+
+                {coverUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCoverUrl('');
+                      setCoverTouched(true);
+                      setCoverError(null);
+                    }}
+                    title="Remove cover image"
+                    className="btn btn-ghost btn-sm"
+                  >
+                    <Trash2 strokeWidth={1.5} className="h-3.5 w-3.5" />
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              <div>
+                <input
+                  type="text"
+                  value={cleanUrlInputValue}
+                  onChange={(e) => {
+                    setCoverUrl(e.target.value);
+                    setCoverTouched(true);
+                    setCoverError(null);
+                  }}
+                  placeholder={
+                    isUploadedDataUrl
+                      ? 'Uploaded image active — paste https:// URL to replace'
+                      : 'Or paste image URL (https://...)'
+                  }
+                  className="field field-sm text-[13.5px]"
+                />
+              </div>
+
+              {coverError && (
+                <p className="font-serif text-[13px] italic text-claret">
+                  {coverError}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {candidatesLoaded && (
+            <div className="mt-3.5 border-t border-rule pt-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="caps-sm text-ink-muted">
+                  {visibleCandidates.length > 0
+                    ? 'Select an edition cover'
+                    : 'No alternative covers found in catalogues'}
+                </span>
+              </div>
+              {visibleCandidates.length > 0 && (
+                <div className="grid grid-cols-4 gap-2.5 sm:grid-cols-6">
+                  {visibleCandidates.map((cand) => {
+                    const isSelected =
+                      stripCustomCoverMarker(coverUrl) ===
+                      stripCustomCoverMarker(cand.url);
+                    return (
+                      <button
+                        key={cand.url}
+                        type="button"
+                        onClick={() => {
+                          setCoverUrl(markCustomCoverUrl(cand.url) || cand.url);
+                          setCoverTouched(true);
+                          setCoverError(null);
+                        }}
+                        className={`group flex flex-col items-center rounded-[2px] border p-1 text-center transition-colors ${
+                          isSelected
+                            ? 'border-claret bg-claret-wash/35 ring-1 ring-claret'
+                            : 'border-rule bg-paper hover:border-ink-muted'
+                        }`}
+                      >
+                        <div className="relative aspect-[2/3] w-full overflow-hidden rounded-[1px] bg-paper-sunken">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={cand.url}
+                            alt={cand.label}
+                            loading="lazy"
+                            onLoad={(e) => {
+                              if (
+                                e.currentTarget.naturalWidth < 10 ||
+                                e.currentTarget.naturalHeight < 10
+                              ) {
+                                setFailedCandidateUrls((prev) => {
+                                  const next = new Set(prev);
+                                  next.add(cand.url);
+                                  return next;
+                                });
+                              }
+                            }}
+                            onError={() => {
+                              setFailedCandidateUrls((prev) => {
+                                const next = new Set(prev);
+                                next.add(cand.url);
+                                return next;
+                              });
+                            }}
+                            className="h-full w-full object-contain"
+                          />
+                        </div>
+                        <span className="mt-1 line-clamp-1 font-sans text-[9.5px] leading-tight text-ink-muted group-hover:text-ink">
+                          {cand.label.replace(/^Hardcover · /, '')}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -303,6 +593,7 @@ export function BookFormModal({
           </button>
           <button
             type="submit"
+            disabled={isUploadingCover}
             className="btn btn-primary"
           >
             {initialBook ? 'Save changes' : 'Add to ledger'}

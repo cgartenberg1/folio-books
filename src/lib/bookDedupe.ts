@@ -1,3 +1,4 @@
+import { pickPreferredCoverUrl } from '@/lib/coverArt';
 import { BookItem, DatePrecision, ReadingStatus } from '@/types/books';
 
 /**
@@ -554,7 +555,12 @@ export function mergeCanonicalBookPair(
     id: primary.id,
     title: pickCleanerTitle(primary.title, secondary.title),
     authorId: primary.authorId || secondary.authorId,
-    coverUrl: primary.coverUrl || secondary.coverUrl,
+    coverUrl: pickPreferredCoverUrl(
+      primary.coverUrl,
+      secondary.coverUrl,
+      primary.title,
+      secondary.title
+    ),
     releaseDate: bestDate.releaseDate,
     datePrecision: bestDate.datePrecision,
     description:

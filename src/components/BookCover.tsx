@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 /**
  * Bookcloth palettes for placeholder covers & shelf spines.
@@ -47,6 +47,8 @@ interface BookCoverProps {
   coverUrl?: string;
   size?: CoverSize;
   className?: string;
+  onClick?: () => void;
+  actionTitle?: string;
 }
 
 export function BookCover({
@@ -55,10 +57,39 @@ export function BookCover({
   coverUrl,
   size = 'md',
   className = '',
+  onClick,
+  actionTitle,
 }: BookCoverProps) {
   const [imgFailed, setImgFailed] = useState(false);
   const [imgLoaded, setImgLoaded] = useState(false);
-  const base = `relative shrink-0 aspect-[2/3] overflow-hidden rounded-[1.5px] shadow-book ${SIZE_CLASSES[size]} ${className}`;
+  const [naturalDims, setNaturalDims] = useState<{ w: number; h: number } | null>(null);
+
+  useEffect(() => {
+    setImgFailed(false);
+    setImgLoaded(false);
+    setNaturalDims(null);
+  }, [coverUrl]);
+
+  const tiny = size === 'xs' || size === 'sm';
+  const showImage = Boolean(coverUrl) && !imgFailed;
+
+  const ratio =
+    naturalDims && naturalDims.h > 0 ? naturalDims.w / naturalDims.h : null;
+  const isNaturalPortrait =
+    ratio !== null && ratio >= 0.52 && ratio <= 0.84;
+  const isNonStandardShape =
+    ratio !== null && (ratio > 0.84 || ratio < 0.52);
+
+  // Adapt md/lg covers to the real jacket's portrait ratio so titles, author names,
+  // and side borders are never cropped; lock self-start so flex rows never stretch height.
+  const computedAspectRatio =
+    showImage && imgLoaded && !tiny && isNaturalPortrait && naturalDims
+      ? `${naturalDims.w} / ${naturalDims.h}`
+      : '2 / 3';
+
+  const base = `relative shrink-0 self-start overflow-hidden rounded-[1.5px] shadow-book ${SIZE_CLASSES[size]} ${
+    onClick ? 'cursor-pointer transition-transform duration-200 hover:-translate-y-0.5 focus-visible:ring-1 focus-visible:ring-claret' : ''
+  } ${className}`;
 
   // Hinge + sheen overlays that make a flat image read as a bound object
   const binding = (
@@ -79,18 +110,33 @@ export function BookCover({
   );
 
   const [cloth, stamp] = clothFor(`${title}:${authorName}`);
-  const tiny = size === 'xs' || size === 'sm';
-  const showImage = Boolean(coverUrl) && !imgFailed;
 
   return (
     <div
       className={base}
-      style={{ backgroundColor: cloth, backgroundImage: LINEN }}
-      aria-label={`${title} by ${authorName}`}
-      role="img"
+      style={{
+        backgroundColor: cloth,
+        backgroundImage: LINEN,
+        aspectRatio: computedAspectRatio,
+      }}
+      aria-label={actionTitle || `${title} by ${authorName}`}
+      title={actionTitle}
+      role={onClick ? 'button' : 'img'}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={
+        onClick
+          ? (e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onClick();
+              }
+            }
+          : undefined
+      }
     >
-      {/* Cloth-bound edition — doubles as the loading state beneath real artwork */}
-      {!tiny && (
+      {/* Cloth-bound edition — doubles as the loading state beneath real artwork, hidden once loaded so transparent PNGs stay clean */}
+      {!tiny && !imgLoaded && (
         <div
           className="absolute inset-[6%] flex flex-col items-center justify-between py-[10%] text-center"
           style={{ border: `0.5px solid ${stamp}66`, color: stamp }}
@@ -113,7 +159,7 @@ export function BookCover({
           </p>
         </div>
       )}
-      {tiny && (
+      {tiny && !imgLoaded && (
         <span
           aria-hidden
           className="absolute left-1/2 top-[22%] h-[38%] w-px -translate-x-1/2"
@@ -122,21 +168,43 @@ export function BookCover({
       )}
 
       {showImage && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={coverUrl}
-          alt=""
-          loading="lazy"
-          onLoad={(e) => {
-            // Some catalogues return a 1×1 pixel instead of a 404 when no cover exists
-            if (e.currentTarget.naturalWidth < 10) setImgFailed(true);
-            else setImgLoaded(true);
-          }}
-          onError={() => setImgFailed(true)}
-          className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-500 ${
-            imgLoaded ? 'opacity-100' : 'opacity-0'
-          }`}
-        />
+        <>
+          {/* Softly toned backdrop when displaying square/wide/angled graphics so nothing is cropped */}
+          {imgLoaded && isNonStandardShape && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={coverUrl}
+              alt=""
+              aria-hidden
+              className="pointer-events-none absolute inset-0 h-full w-full scale-125 object-cover opacity-40 blur-md"
+            />
+          )}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={coverUrl}
+            alt=""
+            loading="lazy"
+            onLoad={(e) => {
+              const nw = e.currentTarget.naturalWidth;
+              const nh = e.currentTarget.naturalHeight;
+              // Some catalogues return a 1×1 pixel instead of a 404 when no cover exists
+              if (nw < 10 || nh < 10) {
+                setImgFailed(true);
+              } else {
+                setNaturalDims({ w: nw, h: nh });
+                setImgLoaded(true);
+              }
+            }}
+            onError={() => setImgFailed(true)}
+            className={`absolute inset-0 h-full w-full transition-opacity duration-300 ${
+              isNonStandardShape
+                ? 'object-contain p-0.5'
+                : tiny
+                ? 'object-cover'
+                : 'object-contain'
+            } ${imgLoaded ? 'opacity-100' : 'opacity-0'}`}
+          />
+        </>
       )}
       {binding}
     </div>

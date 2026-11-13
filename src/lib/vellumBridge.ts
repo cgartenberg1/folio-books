@@ -2,6 +2,7 @@ import {
   areSameCanonicalWork,
   getCanonicalWorkKey,
 } from '@/lib/bookDedupe';
+import { isCustomCoverUrl } from '@/lib/coverArt';
 import { BookItem, ReadingChallenge, ReadingStatus } from '@/types/books';
 
 export interface VellumSyncBookPayload {
@@ -71,7 +72,10 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
     ...primary,
     id: a.id, // preserve stable original ID in Folio
     authorId: primary.authorId || secondary.authorId,
-    coverUrl: primary.coverUrl || secondary.coverUrl,
+    coverUrl:
+      isCustomCoverUrl(secondary.coverUrl) && !isCustomCoverUrl(primary.coverUrl)
+        ? secondary.coverUrl
+        : primary.coverUrl || secondary.coverUrl,
     releaseDate:
       primary.releaseDate && primary.releaseDate.length >= (secondary.releaseDate?.length || 0)
         ? primary.releaseDate

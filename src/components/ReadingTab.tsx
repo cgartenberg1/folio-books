@@ -330,6 +330,8 @@ export function ReadingTab({
                     title={book.title}
                     authorName={book.authorName}
                     coverUrl={book.coverUrl}
+                    onClick={() => onEditBook(book)}
+                    actionTitle="Edit details or change cover artwork"
                   />
                   <div className="flex min-w-0 flex-1 flex-col">
                     <h3 className="book-title text-[19px] line-clamp-2">{book.title}</h3>

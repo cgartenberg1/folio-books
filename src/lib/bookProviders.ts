@@ -7,6 +7,12 @@ import {
   mergeCanonicalBookPair,
   normalizeAuthorCanonicalKey,
 } from '@/lib/bookDedupe';
+import {
+  cleanGoogleCoverUrl,
+  CoverCandidateMeta,
+  pickBestHeadOnCoverUrl,
+  scoreCoverCandidate,
+} from '@/lib/coverArt';
 import { getLocalTodayStr, parseReleaseDateInput } from '@/lib/dates';
 import {
   BookItem,
@@ -96,13 +102,6 @@ function parseHardcoverReleaseDate(
   return parsed;
 }
 
-function cleanGoogleCoverUrl(rawUrl?: string): string | undefined {
-  if (!rawUrl) return undefined;
-  return rawUrl
-    .replace(/^http:\/\//i, 'https://')
-    .replace('&edge=curl', '');
-}
-
 function buildHardcoverAuthHeader(rawToken: string): string {
   const trimmed = rawToken.trim();
   if (trimmed.toLowerCase().startsWith('bearer ')) {
@@ -186,33 +185,155 @@ function extractSearchHits<TDoc>(rawResults: unknown): TDoc[] {
   return hits.map((h) => h.document).filter((d): d is TDoc => Boolean(d));
 }
 
+interface HardcoverEditionCoverNode {
+  title?: string | null;
+  edition_format?: string | null;
+  edition_information?: string | null;
+  reading_format_id?: number | null;
+  isbn_13?: string | null;
+  isbn_10?: string | null;
+  release_date?: string | null;
+  image?: { url?: string | null } | null;
+}
+
+function selectBestCoverAndIsbnFromHardcoverNode(node: {
+  title?: string | null;
+  users_count?: number | null;
+  image?: { url?: string | null } | null;
+  editions?: HardcoverEditionCoverNode[] | null;
+}): { coverUrl?: string; isbn?: string } {
+  const candidates: CoverCandidateMeta[] = [];
+
+  if (node.image?.url) {
+    candidates.push({
+      url: node.image.url,
+      isCanonicalBookImage: true,
+      editionTitle: node.title,
+      usersCount: node.users_count,
+    });
+  }
+
+  let bestIsbn13: string | undefined;
+  let bestIsbn10: string | undefined;
+
+  for (const ed of node.editions || []) {
+    if (!bestIsbn13 && ed.isbn_13 && ed.reading_format_id !== 2) {
+      bestIsbn13 = ed.isbn_13;
+    }
+    if (!bestIsbn10 && ed.isbn_10 && ed.reading_format_id !== 2) {
+      bestIsbn10 = ed.isbn_10;
+    }
+    if (ed.image?.url) {
+      candidates.push({
+        url: ed.image.url,
+        isCanonicalBookImage: false,
+        editionTitle: ed.title || node.title,
+        editionFormat: ed.edition_format,
+        editionInfo: ed.edition_information,
+        readingFormatId: ed.reading_format_id,
+        isbn13: ed.isbn_13,
+        isbn10: ed.isbn_10,
+      });
+    }
+  }
+
+  const coverUrl = pickBestHeadOnCoverUrl(candidates) || node.image?.url || undefined;
+  return {
+    coverUrl,
+    isbn: bestIsbn13 || bestIsbn10,
+  };
+}
+
 /**
- * Given Hardcover book IDs (e.g. from Typesense search hits, which carry no language data),
- * returns the subset that are English-language releases. Returns null if the lookup fails,
- * so callers can degrade gracefully rather than dropping every result.
+ * Given Hardcover book IDs (e.g. from Typesense search hits, which carry no language or edition cover data),
+ * returns the subset that are English-language releases along with each book's best flat head-on edition cover.
+ * Degrades gracefully to bare ID check or null if the lookup fails.
  */
-async function fetchEnglishHardcoverBookIds(
+async function fetchEnglishHardcoverBooksMeta(
   ids: Array<string | number>,
   token: string
-): Promise<Set<string> | null> {
+): Promise<{ englishIds: Set<string>; bestCovers: Map<string, string> } | null> {
   const numericIds = Array.from(
     new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0))
   );
-  if (numericIds.length === 0) return new Set();
+  if (numericIds.length === 0) {
+    return { englishIds: new Set(), bestCovers: new Map() };
+  }
 
   try {
-    const data = await queryHardcoverGraphQL<{ books?: Array<{ id: number }> }>(
-      `query EnglishBooks($ids: [Int!]!) {
+    const data = await queryHardcoverGraphQL<{
+      books?: Array<{
+        id: number;
+        title?: string | null;
+        users_count?: number | null;
+        image?: { url?: string | null } | null;
+        editions?: HardcoverEditionCoverNode[] | null;
+      }>;
+    }>(
+      `query EnglishBooksWithCovers($ids: [Int!]!) {
         books(where: { id: { _in: $ids }, ${HARDCOVER_ENGLISH_BOOK_FILTER} }, limit: ${numericIds.length}) {
           id
+          title
+          users_count
+          image {
+            url
+          }
+          editions(
+            where: {
+              image: { url: { _is_null: false } }
+              _or: [
+                { language: { code2: { _eq: "en" } } }
+                { language_id: { _is_null: true } }
+              ]
+            }
+            order_by: { release_date: asc_nulls_last }
+            limit: 6
+          ) {
+            title
+            edition_format
+            edition_information
+            reading_format_id
+            isbn_13
+            isbn_10
+            image {
+              url
+            }
+          }
         }
       }`,
       { ids: numericIds },
       token
     );
-    return new Set((data.books || []).map((b) => String(b.id)));
+
+    const englishIds = new Set<string>();
+    const bestCovers = new Map<string, string>();
+    for (const b of data.books || []) {
+      const idStr = String(b.id);
+      englishIds.add(idStr);
+      const { coverUrl } = selectBestCoverAndIsbnFromHardcoverNode(b);
+      if (coverUrl) {
+        bestCovers.set(idStr, coverUrl);
+      }
+    }
+    return { englishIds, bestCovers };
   } catch {
-    return null;
+    try {
+      const fallback = await queryHardcoverGraphQL<{ books?: Array<{ id: number }> }>(
+        `query EnglishBooks($ids: [Int!]!) {
+          books(where: { id: { _in: $ids }, ${HARDCOVER_ENGLISH_BOOK_FILTER} }, limit: ${numericIds.length}) {
+            id
+          }
+        }`,
+        { ids: numericIds },
+        token
+      );
+      return {
+        englishIds: new Set((fallback.books || []).map((b) => String(b.id))),
+        bestCovers: new Map(),
+      };
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -281,17 +402,20 @@ export async function searchHardcoverCatalog(
   );
 
   // Drop translations / foreign-only records before de-duplicating, so the English
-  // record is the one that claims each title.
-  const englishIds = await fetchEnglishHardcoverBookIds(
+  // record is the one that claims each title, and resolve flat head-on edition covers.
+  const englishMeta = await fetchEnglishHardcoverBooksMeta(
     bookDocs.map((d) => d.id),
     token
   );
+  const englishIds = englishMeta?.englishIds ?? null;
+  const bestCovers = englishMeta?.bestCovers;
 
   const books: SearchBookResult[] = [];
 
   for (const doc of bookDocs) {
     if (!doc.title || doc.id === undefined) continue;
-    if (englishIds && !englishIds.has(String(doc.id))) continue;
+    const docIdStr = String(doc.id);
+    if (englishIds && !englishIds.has(docIdStr)) continue;
     if (doc.compilation) continue;
     if (isLikelyNoiseEdition(doc.title, false)) continue;
 
@@ -312,7 +436,7 @@ export async function searchHardcoverCatalog(
       continue;
     }
 
-    const coverUrl = doc.image?.url || undefined;
+    const coverUrl = bestCovers?.get(docIdStr) || doc.image?.url || undefined;
     const parsedDate = parseHardcoverReleaseDate(
       doc.release_date,
       doc.release_year,
@@ -322,7 +446,7 @@ export async function searchHardcoverCatalog(
     books.push({
       id: `hc:book:${doc.id}`,
       source: 'hardcover',
-      externalId: String(doc.id),
+      externalId: docIdStr,
       title: cleanDisplayBookTitle(doc.title),
       authorName,
       authorExternalId:
@@ -351,6 +475,10 @@ interface GoogleVolumeItem {
     pageCount?: number;
     language?: string;
     imageLinks?: {
+      extraLarge?: string;
+      large?: string;
+      medium?: string;
+      small?: string;
       thumbnail?: string;
       smallThumbnail?: string;
     };
@@ -359,6 +487,19 @@ interface GoogleVolumeItem {
       identifier?: string;
     }>;
   };
+}
+
+function pickGoogleVolumeCoverUrl(
+  imageLinks?: NonNullable<GoogleVolumeItem['volumeInfo']>['imageLinks']
+): string | undefined {
+  if (!imageLinks) return undefined;
+  return cleanGoogleCoverUrl(
+    imageLinks.large ||
+      imageLinks.medium ||
+      imageLinks.small ||
+      imageLinks.thumbnail ||
+      imageLinks.smallThumbnail
+  );
 }
 
 export async function searchFallbackCatalog(
@@ -478,9 +619,7 @@ export async function searchFallbackCatalog(
             authorName,
             authorExternalId: authorName,
             authorSource: 'google',
-            coverUrl: cleanGoogleCoverUrl(
-              info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail
-            ),
+            coverUrl: pickGoogleVolumeCoverUrl(info.imageLinks),
             releaseDate: parsedDate.releaseDate,
             datePrecision: parsedDate.datePrecision,
             description: info.description || undefined,
@@ -514,7 +653,7 @@ export async function searchCatalog(params: {
   hardcoverError?: string;
 }> {
   const { query, mode = 'all', hardcoverToken, googleApiKey } = params;
-  const cacheKey = `search:en:${mode}::${Boolean(hardcoverToken?.trim())}::${query
+  const cacheKey = `search:v2:en:${mode}::${Boolean(hardcoverToken?.trim())}::${query
     .trim()
     .toLowerCase()}`;
   const cached = getCachedValue<{
@@ -578,9 +717,7 @@ interface HardcoverBibBookNode {
   description?: string | null;
   users_count?: number | null;
   image?: { url?: string | null } | null;
-  editions?: Array<{
-    release_date?: string | null;
-  }> | null;
+  editions?: HardcoverEditionCoverNode[] | null;
 }
 
 function daysBetweenYmd(earlierYmd: string, laterYmd: string): number {
@@ -589,6 +726,30 @@ function daysBetweenYmd(earlierYmd: string, laterYmd: string): number {
   if (Number.isNaN(a) || Number.isNaN(b)) return 0;
   return Math.round((b - a) / 86_400_000);
 }
+
+const HARDCOVER_EDITION_COVER_FRAGMENT = `
+  editions(
+    where: {
+      _or: [
+        { language: { code2: { _eq: "en" } } }
+        { language_id: { _is_null: true } }
+      ]
+    }
+    order_by: { release_date: asc_nulls_last }
+    limit: 8
+  ) {
+    title
+    edition_format
+    edition_information
+    reading_format_id
+    isbn_13
+    isbn_10
+    release_date
+    image {
+      url
+    }
+  }
+`;
 
 async function fetchHardcoverAuthorBooks(params: {
   authorId: string;
@@ -634,8 +795,65 @@ async function fetchHardcoverAuthorBooks(params: {
   const todayStr = getLocalTodayStr();
   const currentYear = Number(todayStr.slice(0, 4));
 
-  const bibQuery = `
+  const bibQueryWithEditionCovers = `
     query AuthorBibliography($hcAuthorId: Int!, $today: date!) {
+      upcoming: books(
+        where: {
+          contributions: {
+            author_id: { _eq: $hcAuthorId }
+            contribution: { _eq: "Author" }
+          }
+          canonical_id: { _is_null: true }
+          compilation: { _eq: false }
+          release_date: { _gt: $today }
+          ${HARDCOVER_ENGLISH_BOOK_FILTER}
+        }
+        order_by: { release_date: asc }
+        limit: 40
+      ) {
+        id
+        title
+        release_date
+        release_year
+        pages
+        description
+        users_count
+        image {
+          url
+        }
+        ${HARDCOVER_EDITION_COVER_FRAGMENT}
+      }
+      released: books(
+        where: {
+          contributions: {
+            author_id: { _eq: $hcAuthorId }
+            contribution: { _eq: "Author" }
+          }
+          canonical_id: { _is_null: true }
+          compilation: { _eq: false }
+          release_date: { _lte: $today }
+          ${HARDCOVER_ENGLISH_BOOK_FILTER}
+        }
+        order_by: [{ users_count: desc_nulls_last }, { release_date: asc_nulls_last }]
+        limit: 150
+      ) {
+        id
+        title
+        release_date
+        release_year
+        pages
+        description
+        users_count
+        image {
+          url
+        }
+        ${HARDCOVER_EDITION_COVER_FRAGMENT}
+      }
+    }
+  `;
+
+  const fallbackBibQuery = `
+    query AuthorBibliographyBasic($hcAuthorId: Int!, $today: date!) {
       upcoming: books(
         where: {
           contributions: {
@@ -702,10 +920,21 @@ async function fetchHardcoverAuthorBooks(params: {
     }
   `;
 
-  const data = await queryHardcoverGraphQL<{
+  let data: {
     upcoming?: HardcoverBibBookNode[];
     released?: HardcoverBibBookNode[];
-  }>(bibQuery, { hcAuthorId: numericAuthorId, today: todayStr }, token);
+  };
+  try {
+    data = await queryHardcoverGraphQL<{
+      upcoming?: HardcoverBibBookNode[];
+      released?: HardcoverBibBookNode[];
+    }>(bibQueryWithEditionCovers, { hcAuthorId: numericAuthorId, today: todayStr }, token);
+  } catch {
+    data = await queryHardcoverGraphQL<{
+      upcoming?: HardcoverBibBookNode[];
+      released?: HardcoverBibBookNode[];
+    }>(fallbackBibQuery, { hcAuthorId: numericAuthorId, today: todayStr }, token);
+  }
 
   // Process already-released books FIRST so self-pub / first-edition releases establish
   // the canonical work before any upcoming paperback or traditional retail re-releases.
@@ -729,7 +958,7 @@ async function fetchHardcoverAuthorBooks(params: {
     const workKey = getCanonicalWorkKey(b.title, authorName);
     if (!workKey || workKey.startsWith('::')) continue;
 
-    const coverUrl = b.image?.url || undefined;
+    const { coverUrl, isbn } = selectBestCoverAndIsbnFromHardcoverNode(b);
     const usersCount = typeof b.users_count === 'number' ? b.users_count : 0;
 
     // Detect single-record republications: if Hardcover bumped `release_date` to a future
@@ -779,6 +1008,7 @@ async function fetchHardcoverAuthorBooks(params: {
       datePrecision: parsedDate.datePrecision,
       description: b.description || undefined,
       pageCount: b.pages || undefined,
+      isbn,
       isOneOff: false,
       isManual: false,
       readingStatus: 'none',
@@ -887,9 +1117,7 @@ async function fetchGoogleFallbackAuthorBooks(params: {
     const workKey = getCanonicalWorkKey(info.title, authorName);
     if (!workKey || workKey.startsWith('::')) continue;
 
-    const coverUrl = cleanGoogleCoverUrl(
-      info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail
-    );
+    const coverUrl = pickGoogleVolumeCoverUrl(info.imageLinks);
     if (!parsedDate.releaseDate && !coverUrl) continue;
 
     const isbn13 = info.industryIdentifiers?.find(
@@ -953,7 +1181,7 @@ export async function fetchAuthorBibliography(params: {
     forceRefresh = false,
   } = params;
 
-  const bibCacheKey = `bib:v2:en:${source}::${externalId || ''}::${authorName
+  const bibCacheKey = `bib:v3:en:${source}::${externalId || ''}::${authorName
     .trim()
     .toLowerCase()}::${Boolean(hardcoverToken?.trim())}`;
   if (!forceRefresh) {
@@ -1026,6 +1254,10 @@ export interface BatchBookEnrichMatch {
 }
 
 interface HardcoverEditionBatchNode {
+  title?: string | null;
+  edition_format?: string | null;
+  edition_information?: string | null;
+  reading_format_id?: number | null;
   isbn_13?: string | null;
   isbn_10?: string | null;
   release_date?: string | null;
@@ -1084,6 +1316,10 @@ export async function enrichBooksBatch(params: {
               }
               limit: 200
             ) {
+              title
+              edition_format
+              edition_information
+              reading_format_id
               isbn_13
               isbn_10
               release_date
@@ -1144,7 +1380,26 @@ export async function enrichBooksBatch(params: {
             (item.isbn10 ? byIsbn.get(item.isbn10) : undefined);
 
           if (ed?.book) {
-            const coverUrl = ed.book.image?.url || ed.image?.url || undefined;
+            const coverUrl =
+              pickBestHeadOnCoverUrl([
+                {
+                  url: ed.book.image?.url,
+                  isCanonicalBookImage: true,
+                  editionTitle: ed.book.title,
+                },
+                {
+                  url: ed.image?.url,
+                  editionTitle: ed.title || ed.book.title,
+                  editionFormat: ed.edition_format,
+                  editionInfo: ed.edition_information,
+                  readingFormatId: ed.reading_format_id,
+                  isbn13: ed.isbn_13,
+                  isbn10: ed.isbn_10,
+                },
+              ]) ||
+              ed.book.image?.url ||
+              ed.image?.url ||
+              undefined;
             // Prefer edition release_date when canonical book date is a generic YYYY-01-01 in the same year
             let bestRawDate = ed.book.release_date;
             if (
@@ -1223,10 +1478,12 @@ export async function enrichBooksBatch(params: {
             (d) => Boolean(d.title && !d.compilation)
           )
         );
-        const englishIds = await fetchEnglishHardcoverBookIds(
+        const englishMeta = await fetchEnglishHardcoverBooksMeta(
           docsByAlias.flat().map((d) => d.id),
           hardcoverToken
         );
+        const englishIds = englishMeta?.englishIds ?? null;
+        const bestCovers = englishMeta?.bestCovers;
 
         slice.forEach((item, idx) => {
           const allDocs = docsByAlias[idx];
@@ -1261,7 +1518,9 @@ export async function enrichBooksBatch(params: {
             chosen.author_names?.[0] ||
             item.authorName ||
             'Unknown Author';
-          const coverUrl = chosen.image?.url || undefined;
+          const chosenIdStr = String(chosen.id);
+          const coverUrl =
+            bestCovers?.get(chosenIdStr) || chosen.image?.url || undefined;
           const parsedDate = parseHardcoverReleaseDate(
             chosen.release_date,
             chosen.release_year,
@@ -1341,9 +1600,7 @@ export async function enrichBooksBatch(params: {
             externalId: hit.id,
             title: info.title || item.title,
             authorName: info.authors?.[0] || item.authorName || 'Unknown Author',
-            coverUrl: cleanGoogleCoverUrl(
-              info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail
-            ),
+            coverUrl: pickGoogleVolumeCoverUrl(info.imageLinks),
             releaseDate: parsedDate.releaseDate,
             datePrecision: parsedDate.datePrecision,
             pageCount: info.pageCount || undefined,
@@ -1483,4 +1740,312 @@ export async function resolveAuthorsBatch(params: {
       .map((n) => resolvedMap.get(n.toLowerCase()))
       .filter((a): a is SearchAuthorResult => Boolean(a)),
   };
+}
+
+export interface BookCoverOption {
+  url: string;
+  label: string;
+  source: 'hardcover' | 'openlibrary' | 'google';
+  score: number;
+}
+
+export async function fetchBookCoverCandidates(params: {
+  title: string;
+  authorName: string;
+  isbn?: string;
+  externalId?: string;
+  source?: DataSource;
+  hardcoverToken?: string;
+  googleApiKey?: string;
+}): Promise<BookCoverOption[]> {
+  const {
+    title,
+    authorName,
+    isbn,
+    externalId,
+    source,
+    hardcoverToken,
+    googleApiKey,
+  } = params;
+
+  const trimmedTitle = title.trim();
+  const trimmedAuthor = authorName.trim();
+  if (!trimmedTitle) return [];
+
+  const rawOptions: Array<{
+    meta: CoverCandidateMeta;
+    label: string;
+    source: 'hardcover' | 'openlibrary' | 'google';
+  }> = [];
+
+  const discoveredIsbns = new Set<string>();
+  if (isbn) {
+    const clean = isbn.replace(/[^0-9X]/gi, '');
+    if (clean.length === 10 || clean.length === 13) {
+      discoveredIsbns.add(clean);
+    }
+  }
+
+  // 1. Hardcover editions (print & ebook covers)
+  const hcTask = (async () => {
+    if (!hardcoverToken?.trim()) return;
+    try {
+      const targetBookIds = new Set<number>();
+      if (source === 'hardcover' && externalId && /^\d+$/.test(externalId)) {
+        targetBookIds.add(Number(externalId));
+      }
+
+      if (targetBookIds.size === 0) {
+        const searchGql = `
+          query SearchCoverBooks($q: String!) {
+            bookSearch: search(query: $q, query_type: "Book", per_page: 5, page: 1) {
+              results
+            }
+          }
+        `;
+        const searchRes = await queryHardcoverGraphQL<{
+          bookSearch?: { results?: unknown };
+        }>(
+          searchGql,
+          { q: `${trimmedTitle} ${trimmedAuthor}`.trim() },
+          hardcoverToken
+        );
+        const hits = extractSearchHits<HardcoverSearchBookDoc>(
+          searchRes.bookSearch?.results
+        );
+        for (const h of hits) {
+          if (!h.title || h.compilation) continue;
+          const candAuthor =
+            h.contributions?.[0]?.author?.name || h.author_names?.[0] || '';
+          if (
+            !trimmedAuthor ||
+            areSameCanonicalWork(
+              { title: trimmedTitle, authorName: trimmedAuthor },
+              { title: h.title, authorName: candAuthor || trimmedAuthor }
+            )
+          ) {
+            const numId = Number(h.id);
+            if (Number.isInteger(numId) && numId > 0) {
+              targetBookIds.add(numId);
+            }
+          }
+        }
+      }
+
+      if (targetBookIds.size === 0) return;
+
+      const idsArr = Array.from(targetBookIds).slice(0, 3);
+      const editionsRes = await queryHardcoverGraphQL<{
+        books?: Array<{
+          id: number;
+          title?: string | null;
+          users_count?: number | null;
+          image?: { url?: string | null } | null;
+          editions?: HardcoverEditionCoverNode[] | null;
+        }>;
+      }>(
+        `query BookCoverEditions($ids: [Int!]!) {
+          books(where: { id: { _in: $ids } }, limit: 3) {
+            id
+            title
+            users_count
+            image {
+              url
+            }
+            editions(
+              where: {
+                image: { url: { _is_null: false } }
+                _or: [
+                  { language: { code2: { _eq: "en" } } }
+                  { language_id: { _is_null: true } }
+                ]
+              }
+              order_by: { release_date: asc_nulls_last }
+              limit: 16
+            ) {
+              title
+              edition_format
+              edition_information
+              reading_format_id
+              isbn_13
+              isbn_10
+              release_date
+              image {
+                url
+              }
+            }
+          }
+        }`,
+        { ids: idsArr },
+        hardcoverToken
+      );
+
+      for (const b of editionsRes.books || []) {
+        if (b.image?.url) {
+          rawOptions.push({
+            source: 'hardcover',
+            label: 'Hardcover · Main',
+            meta: {
+              url: b.image.url,
+              isCanonicalBookImage: true,
+              editionTitle: b.title,
+              usersCount: b.users_count,
+            },
+          });
+        }
+        for (const ed of b.editions || []) {
+          if (ed.isbn_13 && ed.reading_format_id !== 2) {
+            discoveredIsbns.add(ed.isbn_13.replace(/[^0-9X]/gi, ''));
+          }
+          if (!ed.image?.url || ed.reading_format_id === 2) continue;
+          const formatLabel =
+            ed.edition_format?.trim() ||
+            (ed.reading_format_id === 4
+              ? 'E-Book'
+              : ed.reading_format_id === 1
+              ? 'Print'
+              : 'Edition');
+          rawOptions.push({
+            source: 'hardcover',
+            label: `Hardcover · ${formatLabel}`,
+            meta: {
+              url: ed.image.url,
+              editionTitle: ed.title || b.title,
+              editionFormat: ed.edition_format,
+              editionInfo: ed.edition_information,
+              readingFormatId: ed.reading_format_id,
+              isbn13: ed.isbn_13,
+              isbn10: ed.isbn_10,
+            },
+          });
+        }
+      }
+    } catch {
+      // Ignore Hardcover candidate error and continue with Google / Open Library
+    }
+  })();
+
+  // 2. Google Books front covers
+  const gbTask = (async () => {
+    try {
+      const keyParam = googleApiKey
+        ? `&key=${encodeURIComponent(googleApiKey)}`
+        : '';
+      const q = trimmedAuthor
+        ? `intitle:"${trimmedTitle}" inauthor:"${trimmedAuthor}"`
+        : `intitle:"${trimmedTitle}"`;
+      const res = await fetch(
+        `${GOOGLE_BOOKS_ENDPOINT}?q=${encodeURIComponent(
+          q
+        )}&maxResults=8&printType=books&langRestrict=en${keyParam}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      for (const item of (data.items || []) as GoogleVolumeItem[]) {
+        const info = item.volumeInfo;
+        if (!info?.title) continue;
+        if (
+          trimmedAuthor &&
+          info.authors?.length &&
+          !authorMatchesName(info.authors, trimmedAuthor)
+        ) {
+          continue;
+        }
+        const isbn13 = info.industryIdentifiers?.find(
+          (i) => i.type === 'ISBN_13'
+        )?.identifier;
+        if (isbn13) {
+          discoveredIsbns.add(isbn13.replace(/[^0-9X]/gi, ''));
+        }
+        const url = pickGoogleVolumeCoverUrl(info.imageLinks);
+        if (!url) continue;
+        rawOptions.push({
+          source: 'google',
+          label: 'Google Books',
+          meta: {
+            url,
+            editionTitle: info.title,
+            readingFormatId: 1,
+            isbn13,
+          },
+        });
+      }
+    } catch {
+      // Ignore Google Books candidate error
+    }
+  })();
+
+  // 3. Open Library flat jacket scans
+  const olTask = (async () => {
+    try {
+      const paramsOl = new URLSearchParams({
+        title: trimmedTitle,
+        limit: '6',
+        fields: 'title,author_name,cover_i,isbn',
+      });
+      if (trimmedAuthor) {
+        paramsOl.set('author', trimmedAuthor);
+      }
+      const res = await fetch(
+        `https://openlibrary.org/search.json?${paramsOl.toString()}`,
+        { cache: 'no-store' }
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      for (const doc of data.docs || []) {
+        if (doc.cover_i) {
+          rawOptions.push({
+            source: 'openlibrary',
+            label: 'Open Library',
+            meta: {
+              url: `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`,
+              editionTitle: doc.title,
+              readingFormatId: 1,
+            },
+          });
+        }
+      }
+    } catch {
+      // Ignore Open Library transient error
+    }
+  })();
+
+  await Promise.all([hcTask, gbTask, olTask]);
+
+  for (const isbnVal of Array.from(discoveredIsbns).slice(0, 3)) {
+    rawOptions.push({
+      source: 'openlibrary',
+      label: `ISBN ${isbnVal}`,
+      meta: {
+        url: `https://covers.openlibrary.org/b/isbn/${isbnVal}-L.jpg?default=false`,
+        readingFormatId: 1,
+        isbn13: isbnVal.length === 13 ? isbnVal : undefined,
+        isbn10: isbnVal.length === 10 ? isbnVal : undefined,
+      },
+    });
+  }
+
+  const byUrl = new Map<string, BookCoverOption>();
+  for (const item of rawOptions) {
+    const cleanUrl = cleanGoogleCoverUrl(item.meta.url) || item.meta.url?.trim();
+    if (!cleanUrl) continue;
+    const score = scoreCoverCandidate({ ...item.meta, url: cleanUrl });
+    if (score < -80) continue;
+
+    const dedupeKey = cleanUrl.replace(/^https?:\/\//i, '');
+    const existing = byUrl.get(dedupeKey);
+    if (!existing || score > existing.score) {
+      byUrl.set(dedupeKey, {
+        url: cleanUrl,
+        label: item.label,
+        source: item.source,
+        score,
+      });
+    }
+  }
+
+  return Array.from(byUrl.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 12);
 }

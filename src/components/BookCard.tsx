@@ -136,7 +136,13 @@ export function BookCard({
     <article className="group relative flex gap-4 border-b border-rule py-5 sm:gap-5">
       {showDateBlock && <DateBlock book={book} />}
 
-      <BookCover title={book.title} authorName={book.authorName} coverUrl={book.coverUrl} />
+      <BookCover
+        title={book.title}
+        authorName={book.authorName}
+        coverUrl={book.coverUrl}
+        onClick={onEditBook ? () => onEditBook(book) : undefined}
+        actionTitle={onEditBook ? 'Edit details or change cover artwork' : undefined}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-start justify-between gap-3">
