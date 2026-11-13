@@ -1,3 +1,7 @@
+import {
+  areSameCanonicalWork,
+  getCanonicalWorkKey,
+} from '@/lib/bookDedupe';
 import { BookItem, ReadingChallenge, ReadingStatus } from '@/types/books';
 
 export interface VellumSyncBookPayload {
@@ -43,17 +47,7 @@ export interface VellumBridgeLedger {
 }
 
 export function normBookMatchKey(title: string, authorName: string): string {
-  const cleanTitle = (title || '')
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, '')
-    .split(':')[0]
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-  const cleanAuthor = (authorName || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-  return `${cleanTitle}::${cleanAuthor}`;
+  return getCanonicalWorkKey(title, authorName);
 }
 
 function toTimestamp(iso?: string): number {
@@ -119,10 +113,19 @@ export function mergeBookLists(base: BookItem[], incoming: BookItem[]): BookItem
 
   for (const inc of incoming) {
     const norm = normBookMatchKey(inc.title, inc.authorName);
-    const matchedId =
+    let matchedId =
       (byId.has(inc.id) ? inc.id : undefined) ||
       (inc.vellumBookId ? vellumToId.get(inc.vellumBookId) : undefined) ||
       normToId.get(norm);
+
+    if (!matchedId) {
+      for (const existing of Array.from(byId.values())) {
+        if (areSameCanonicalWork(existing, inc)) {
+          matchedId = existing.id;
+          break;
+        }
+      }
+    }
 
     if (matchedId && byId.has(matchedId)) {
       const merged = mergeBookPair(byId.get(matchedId)!, inc);

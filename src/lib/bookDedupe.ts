@@ -1,0 +1,678 @@
+import { BookItem, DatePrecision, ReadingStatus } from '@/types/books';
+
+/**
+ * Multi-book bundles, study guides, samplers, audio split parts, and explicit
+ * foreign-language edition labels that should never appear in an English ledger.
+ */
+const NOISE_TITLE_PATTERNS: RegExp[] = [
+  /\bsummary of\b/i,
+  /\bstudy guide\b/i,
+  /\bworkbook(\s+for)?\b/i,
+  /\banalysis of\b/i,
+  /\bcliff'?s?\s*notes\b/i,
+  /\bsparknotes\b/i,
+  /\bbook\s*club\s*kit\b/i,
+  /\bdiscussion\s+guide\b/i,
+  /\breading\s+guide\b/i,
+  /\btrivia\b/i,
+  /\bboxed\s+set\b/i,
+  /\bbox\s+set\b/i,
+  /\bslipcase\s+set\b/i,
+  /\b\d+\s*-\s*book\s+(bundle|set|collection|pack)\b/i,
+  /\b\d+\s*in\s*1\b/i,
+  /\bbooks?\s+\d+\s*(?:-|–|—|to|through)\s*\d+\b/i,
+  /\bvolumes?\s+\d+\s*(?:-|–|—|to|through)\s*\d+\b/i,
+  /\bcomplete\s+(trilogy|duology|quartet|series|collection|saga)\b/i,
+  /\bcollection:\s*books\b/i,
+  /\bomnibus\b/i,
+  /\bsampler\b/i,
+  /\bfree\s+preview\b/i,
+  /\bsneak\s+peek\b/i,
+  /\bbonus\s+(chapter|epilogue|scene)s?\b/i,
+  /\bexcerpt(\s+from)?\b/i,
+  /\bcoloring\s+book\b/i,
+  /\breading\s+journal\b/i,
+  /\bdramatized\s+adaptation\b/i,
+  /\bgraphicaudio\b/i,
+  /\broleplaying\s+game\b/i,
+  /\(\s*\d+\s+of\s+\d+\s*\)/i,
+  /\bpart\s+\d+\s+of\s+\d+\b/i,
+  /,\s*part\s+\d+\b/i,
+  /\b(german|spanish|french|italian|portuguese|polish|russian|japanese|chinese|korean|dutch|turkish|swedish|czech|hungarian|romanian|ukrainian|hebrew|arabic)\s+edition\b/i,
+  /\b(edición|édition|ausgabe|edizione|edição|wydanie)\b/i,
+];
+
+/**
+ * Formats & reissues that ONLY exist after a work has already been published
+ * (never a brand-new unreleased original work).
+ */
+const STRICT_SECONDARY_REISSUE_PATTERNS: RegExp[] = [
+  /\btrade\s+paperback\b/i,
+  /\bmass\s+market(\s+paperback)?\b/i,
+  /\bpaperback\s+edition\b/i,
+  /\(\s*(tpb|mmpb|paperback|mass\s+market|large\s+print)\s*\)/i,
+  /(?::|-|–|—)\s*paperback$/i,
+  /\blarge\s+print\b/i,
+  /\blarge\s+type\b/i,
+  /\bdyslexic\s+edition\b/i,
+  /\b\d+(?:st|nd|rd|th)\s+anniversary\b/i,
+  /\banniversary\s+edition\b/i,
+  /\bcentennial\s+edition\b/i,
+  /\bcentenary\s+edition\b/i,
+  /\breissue(\s+edition)?\b/i,
+  /\brepackage(\s+edition)?\b/i,
+  /\bre-?release\b/i,
+  /\brevised\s+edition\b/i,
+  /\bupdated\s+edition\b/i,
+  /\bexpanded\s+edition\b/i,
+  /\brestored\s+edition\b/i,
+  /\b(movie|film|tv|television|netflix|hbo|prime)\s+tie-?in\b/i,
+  /\bnow\s+a\s+major\s+motion\s+picture\b/i,
+  /\bsoon\s+to\s+be\s+a\s+major\s+motion\s+picture\b/i,
+  /\bbook\s+club\s+edition\b/i,
+  /\bleatherbound(\s+edition)?\b/i,
+  /\bfolio\s+society\b/i,
+  /\bpenguin\s+(classics|clothbound)\b/i,
+  /\bmodern\s+library\b/i,
+  /\beveryman'?s\s+library\b/i,
+];
+
+/**
+ * Edition / retailer / format decorations stripped when computing a book's
+ * canonical work title or cleaning display titles.
+ */
+const EDITION_DECORATION_PATTERNS: RegExp[] = [
+  ...STRICT_SECONDARY_REISSUE_PATTERNS,
+  /\bdeluxe(\s+limited)?(\s+hardcover)?\s+edition\b/i,
+  /\blimited\s+edition\b/i,
+  /\bcollector'?s?\s+edition\b/i,
+  /\bspecial\s+edition\b/i,
+  /\bsignature\s+edition\b/i,
+  /\bheirloom\s+edition\b/i,
+  /\bsigned(\s+edition)?\b/i,
+  /\bautographed(\s+edition)?\b/i,
+  /\billustrated(\s+edition)?\b/i,
+  /\bannotated(\s+edition)?\b/i,
+  /\bclothbound(\s+edition)?\b/i,
+  /\bhardcover\s+edition\b/i,
+  /\bhardback\s+edition\b/i,
+  /\bkindle\s+edition\b/i,
+  /\bebook\s+edition\b/i,
+  /\blibrary\s+edition\b/i,
+  /\bunabridged\b/i,
+  /\babridged\b/i,
+  /\bsprayed\s+edges?\b/i,
+  /\bstenciled\s+edges?\b/i,
+  /\b(uk|u\.k\.|us|u\.s\.|international|export)\s+edition\b/i,
+  /\b(exclusive|indie\s+exclusive)\s+edition\b/i,
+  /\b(waterstones|barnes\s*(?:&|and)\s*noble|b&n|target|walmart|indigo|amazon|books-a-million|bam)\s+exclusive(\s+edition)?\b/i,
+  /\b(fairyloot|illumicrate|owlcrate|litjoy|broken\s+binding|subterranean\s+press|gold\s*sboro)(\s+edition)?\b/i,
+  /\bfirst\s+edition\b/i,
+  /\bnew\s+edition\b/i,
+  /\bstandard\s+edition\b/i,
+  /\bretail\s+edition\b/i,
+];
+
+const DESCRIPTIVE_SUBTITLE_RE =
+  /\b(novel|novella|story|stories|tale|tales|thriller|mystery|romance|memoir|biography|autobiography|fantasy|litrpg|saga|chronicles|trilogy|duology|series|edition|paperback|hardcover|reissue|guide|handbook|history|life\s+and\s+times)\b/i;
+
+export function isLikelyNoiseTitle(title: string, filterUntitled = false): boolean {
+  const trimmed = (title || '').trim();
+  if (!trimmed) return true;
+  if (filterUntitled && /^untitled\b/i.test(trimmed)) {
+    return true;
+  }
+  return NOISE_TITLE_PATTERNS.some((re) => re.test(trimmed));
+}
+
+export function isStrictSecondaryReissueTitle(title: string): boolean {
+  return STRICT_SECONDARY_REISSUE_PATTERNS.some((re) => re.test(title || ''));
+}
+
+export function hasEditionDecorationInTitle(title: string): boolean {
+  const t = title || '';
+  if (EDITION_DECORATION_PATTERNS.some((re) => re.test(t))) return true;
+  if (/\([^)]*(edition|paperback|hardcover|reissue|tie-?in|exclusive|print|#[0-9]+)[^)]*\)/i.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Strips trailing parenthetical/dashed edition noise for cleaner display when merging,
+ * while preserving genuine titles and subtitles.
+ */
+export function cleanDisplayBookTitle(rawTitle: string): string {
+  let t = (rawTitle || '').trim();
+  if (!t) return t;
+
+  // Remove parenthetical/bracketed blocks that only contain edition, format, or Goodreads series (#1) metadata
+  t = t.replace(
+    /\s*[\(\[][^\)\]]*(?:edition|paperback|hardcover|hardback|large\s+print|reissue|repackage|tie-?in|exclusive|sprayed\s+edges|leatherbound|clothbound|unabridged|anniversary|fairyloot|illumicrate|owlcrate|#\s*\d+|book\s+\d+|vol\.?\s*\d+)[^\)\]]*[\)\]]/gi,
+    ''
+  );
+
+  // Remove trailing " - Trade Paperback", " : Deluxe Edition", etc.
+  for (const pat of EDITION_DECORATION_PATTERNS) {
+    const tailRe = new RegExp(`\\s*(?::|—|–|-|/)\\s*${pat.source}\\s*$`, 'i');
+    t = t.replace(tailRe, '');
+  }
+
+  return t.replace(/\s{2,}/g, ' ').trim() || rawTitle.trim();
+}
+
+export function normalizeAuthorCanonicalKey(name: string): string {
+  let s = (name || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’‘`]/g, '');
+
+  // Collapse spaced initials like "v. e. schwab" or "j. r. r. tolkien" -> "ve schwab" / "jrr tolkien"
+  s = s.replace(/\b([a-z])\.\s*(?=[a-z]\.)/g, '$1');
+  s = s.replace(/\b([a-z])\./g, '$1');
+
+  return s
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\b(jr|sr|iii|ii|iv)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function romanToInt(roman: string): number | null {
+  const map: Record<string, number> = {
+    i: 1,
+    ii: 2,
+    iii: 3,
+    iv: 4,
+    v: 5,
+    vi: 6,
+    vii: 7,
+    viii: 8,
+    ix: 9,
+    x: 10,
+  };
+  return map[roman.toLowerCase()] ?? null;
+}
+
+function extractExplicitVolumeNumber(rawTitle: string): number | null {
+  const t = rawTitle || '';
+  const patterns = [
+    /(?:volume|vol\.?|book|part|tome)\s+(\d{1,3})\b/i,
+    /#\s*(\d{1,3})(?:\b|$)/i,
+    /\b(?:volume|vol\.?|book|part)\s+(i|ii|iii|iv|v|vi|vii|viii|ix|x)\b/i,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m?.[1]) {
+      const asNum = Number(m[1]);
+      if (!Number.isNaN(asNum) && asNum > 0) return asNum;
+      const asRom = romanToInt(m[1]);
+      if (asRom) return asRom;
+    }
+  }
+  return null;
+}
+
+function normalizeSegmentTokens(raw: string, stripLeadingArticle: boolean): string {
+  let s = (raw || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/['’‘`]/g, '')
+    .replace(/&/g, ' and ');
+
+  for (const pat of EDITION_DECORATION_PATTERNS) {
+    s = s.replace(new RegExp(pat.source, 'gi'), ' ');
+  }
+
+  // Strip series/book numbering tokens ("book 1", "vol 2", "#1")
+  s = s
+    .replace(/\b(?:book|volume|vol|part)\s+\d+\b/gi, ' ')
+    .replace(/#\s*\d+\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (stripLeadingArticle) {
+    const withoutArticle = s.replace(/^(?:the|a|an)\s+/, '').trim();
+    if (withoutArticle.length >= 4) {
+      s = withoutArticle;
+    }
+  }
+
+  return s;
+}
+
+export interface CanonicalWorkParts {
+  headKey: string;
+  subKey: string;
+  fullKey: string;
+  isDescriptiveSub: boolean;
+  volumeNumber: number | null;
+}
+
+export function parseCanonicalWorkParts(rawTitle: string): CanonicalWorkParts {
+  const volumeNumber = extractExplicitVolumeNumber(rawTitle);
+
+  // Strip parenthetical / bracketed blocks unless doing so empties the title
+  const strippedParens = (rawTitle || '')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .trim();
+  const working = strippedParens.length >= 2 ? strippedParens : rawTitle || '';
+
+  // Split head vs subtitle on `:`, `—`, `–`, or spaced ` - `
+  const splitMatch = working.match(/^(.+?)(?:\s*[:—–]\s*|\s+-\s+)(.+)$/);
+  const rawHead = splitMatch ? splitMatch[1] : working;
+  const rawSub = splitMatch ? splitMatch[2] : '';
+
+  const headKey = normalizeSegmentTokens(rawHead, true);
+  let subKey = rawSub ? normalizeSegmentTokens(rawSub, false) : '';
+
+  // Check if subtitle is a marketing/genre/edition descriptor rather than a distinct sequel title
+  const subWords = subKey.split(' ').filter(Boolean);
+  const isDescriptiveSub =
+    !subKey ||
+    DESCRIPTIVE_SUBTITLE_RE.test(rawSub) ||
+    /^(?:a|an|the|how|why|what|when|where|notes|essays|memoir|poems)\b/i.test(
+      rawSub.trim()
+    ) ||
+    subWords.length >= 5 ||
+    subKey === headKey;
+
+  if (subKey && subKey === headKey) {
+    subKey = '';
+  }
+
+  const fullKey = subKey && !isDescriptiveSub ? `${headKey}::${subKey}` : headKey;
+
+  return {
+    headKey,
+    subKey,
+    fullKey,
+    isDescriptiveSub,
+    volumeNumber,
+  };
+}
+
+/**
+ * Fast string key for Map indexing (`canonicalTitle::canonicalAuthor`).
+ */
+export function getCanonicalWorkKey(title: string, authorName: string): string {
+  const parts = parseCanonicalWorkParts(title);
+  const authorKey = normalizeAuthorCanonicalKey(authorName);
+  return `${parts.fullKey || parts.headKey}::${authorKey}`;
+}
+
+/**
+ * Pairwise canonical work check: handles republications, trade paperbacks,
+ * self-pub subtitles, and Goodreads series tags without collapsing distinct sequels.
+ */
+export function areSameCanonicalWork(
+  a: { title: string; authorName: string },
+  b: { title: string; authorName: string }
+): boolean {
+  const authorA = normalizeAuthorCanonicalKey(a.authorName);
+  const authorB = normalizeAuthorCanonicalKey(b.authorName);
+  if (authorA && authorB && authorA !== authorB) {
+    // Allow one containing the other for pen-name middle initials ("Martha Wells" vs "Martha R Wells")
+    const tokensA = authorA.split(' ');
+    const tokensB = authorB.split(' ');
+    const lastMatch =
+      tokensA.length >= 2 &&
+      tokensB.length >= 2 &&
+      tokensA[0][0] === tokensB[0][0] &&
+      tokensA[tokensA.length - 1] === tokensB[tokensB.length - 1];
+    if (!lastMatch) return false;
+  }
+
+  const pa = parseCanonicalWorkParts(a.title);
+  const pb = parseCanonicalWorkParts(b.title);
+
+  if (!pa.headKey || !pb.headKey) return false;
+
+  // Never collapse explicitly different numbered volumes ("Heartstopper Vol. 1" vs "Vol. 2")
+  if (
+    pa.volumeNumber !== null &&
+    pb.volumeNumber !== null &&
+    pa.volumeNumber !== pb.volumeNumber
+  ) {
+    return false;
+  }
+
+  if (pa.fullKey === pb.fullKey) {
+    return true;
+  }
+
+  // Match "Title" against "Title: Marketing/Genre Subtitle"
+  if (pa.headKey === pb.headKey && pa.headKey.length >= 4) {
+    const aHasDistinctSub = Boolean(pa.subKey && !pa.isDescriptiveSub);
+    const bHasDistinctSub = Boolean(pb.subKey && !pb.isDescriptiveSub);
+    if (!aHasDistinctSub || !bHasDistinctSub) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function normalizedSortableDate(
+  releaseDate?: string,
+  datePrecision?: DatePrecision
+): string | null {
+  if (!releaseDate) return null;
+  if (datePrecision === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(releaseDate)) {
+    return releaseDate;
+  }
+  if (datePrecision === 'month' && /^\d{4}-\d{2}$/.test(releaseDate)) {
+    return `${releaseDate}-15`;
+  }
+  if (datePrecision === 'year' && /^\d{4}$/.test(releaseDate)) {
+    return `${releaseDate}-06-15`;
+  }
+  return releaseDate;
+}
+
+function isAlreadyReleased(
+  book: Pick<BookItem, 'releaseDate' | 'datePrecision'>,
+  todayStr: string
+): boolean {
+  if (!book.releaseDate) return false;
+  const todayYear = todayStr.slice(0, 4);
+  const todayMonth = todayStr.slice(0, 7);
+  if (book.datePrecision === 'day') return book.releaseDate <= todayStr;
+  if (book.datePrecision === 'month') return book.releaseDate <= todayMonth;
+  if (book.datePrecision === 'year') return book.releaseDate < todayYear;
+  return false;
+}
+
+function pickCanonicalReleaseDate(
+  a: BookItem,
+  b: BookItem,
+  todayStr: string,
+  aUsersCount?: number,
+  bUsersCount?: number
+): { releaseDate?: string; datePrecision: DatePrecision } {
+  if (!a.releaseDate) {
+    return { releaseDate: b.releaseDate, datePrecision: b.datePrecision };
+  }
+  if (!b.releaseDate) {
+    return { releaseDate: a.releaseDate, datePrecision: a.datePrecision };
+  }
+
+  const aReleased = isAlreadyReleased(a, todayStr);
+  const bReleased = isAlreadyReleased(b, todayStr);
+
+  // If one copy was ALREADY published and the other is a future republication/paperback:
+  // keep the original published date unless the past entry is a tiny dead stub (<5 users vs >=50 users).
+  if (aReleased !== bReleased) {
+    const past = aReleased ? a : b;
+    const future = aReleased ? b : a;
+    const pastUsers = aReleased ? aUsersCount : bUsersCount;
+    const futureUsers = aReleased ? bUsersCount : aUsersCount;
+
+    const pastLooksLikeDeadStub =
+      typeof pastUsers === 'number' &&
+      typeof futureUsers === 'number' &&
+      pastUsers < 5 &&
+      futureUsers >= 50 &&
+      !isStrictSecondaryReissueTitle(future.title);
+
+    const chosen = pastLooksLikeDeadStub ? future : past;
+    return {
+      releaseDate: chosen.releaseDate,
+      datePrecision: chosen.datePrecision,
+    };
+  }
+
+  const yearA = a.releaseDate.slice(0, 4);
+  const yearB = b.releaseDate.slice(0, 4);
+
+  // Same publication year: prefer exact day precision over month/year
+  if (yearA === yearB) {
+    const rank = (p: DatePrecision) =>
+      p === 'day' ? 3 : p === 'month' ? 2 : p === 'year' ? 1 : 0;
+    if (rank(a.datePrecision) !== rank(b.datePrecision)) {
+      const better = rank(a.datePrecision) > rank(b.datePrecision) ? a : b;
+      return {
+        releaseDate: better.releaseDate,
+        datePrecision: better.datePrecision,
+      };
+    }
+  }
+
+  const sortA = normalizedSortableDate(a.releaseDate, a.datePrecision) || '9999';
+  const sortB = normalizedSortableDate(b.releaseDate, b.datePrecision) || '9999';
+
+  // Both released: earliest original publication date wins over later paperback/deluxe reissues
+  if (aReleased && bReleased) {
+    const earlier = sortA <= sortB ? a : b;
+    return {
+      releaseDate: earlier.releaseDate,
+      datePrecision: earlier.datePrecision,
+    };
+  }
+
+  // Both upcoming: prefer day precision, then higher readership or earlier date
+  const rank = (p: DatePrecision) =>
+    p === 'day' ? 3 : p === 'month' ? 2 : p === 'year' ? 1 : 0;
+  if (rank(a.datePrecision) !== rank(b.datePrecision)) {
+    const better = rank(a.datePrecision) > rank(b.datePrecision) ? a : b;
+    return {
+      releaseDate: better.releaseDate,
+      datePrecision: better.datePrecision,
+    };
+  }
+  if ((aUsersCount ?? 0) !== (bUsersCount ?? 0)) {
+    const popular = (aUsersCount ?? 0) >= (bUsersCount ?? 0) ? a : b;
+    return {
+      releaseDate: popular.releaseDate,
+      datePrecision: popular.datePrecision,
+    };
+  }
+  const first = sortA <= sortB ? a : b;
+  return {
+    releaseDate: first.releaseDate,
+    datePrecision: first.datePrecision,
+  };
+}
+
+function statusPriority(status: ReadingStatus): number {
+  if (status === 'read') return 3;
+  if (status === 'todo') return 2;
+  return 1;
+}
+
+function pickCleanerTitle(aTitle: string, bTitle: string): string {
+  const cleanA = cleanDisplayBookTitle(aTitle);
+  const cleanB = cleanDisplayBookTitle(bTitle);
+  const aDecorated = hasEditionDecorationInTitle(aTitle);
+  const bDecorated = hasEditionDecorationInTitle(bTitle);
+
+  if (aDecorated && !bDecorated) return cleanB;
+  if (bDecorated && !aDecorated) return cleanA;
+  return cleanA.length <= cleanB.length ? cleanA : cleanB;
+}
+
+/**
+ * Merges two BookItem records representing the same canonical work, preserving
+ * all reading status, ratings, notes, Vellum progress, and earliest original release date.
+ */
+export function mergeCanonicalBookPair(
+  a: BookItem,
+  b: BookItem,
+  todayStr: string,
+  meta?: { aUsersCount?: number; bUsersCount?: number }
+): BookItem {
+  // Choose canonical primary ID: prefer user-engaged record, then Hardcover, then non-vellum catalog ID
+  const aEngaged =
+    a.readingStatus !== 'none' || Boolean(a.rating || a.notes || a.vellumBookId);
+  const bEngaged =
+    b.readingStatus !== 'none' || Boolean(b.rating || b.notes || b.vellumBookId);
+
+  const scoreIdentity = (item: BookItem, engaged: boolean, users?: number) =>
+    (engaged ? 100 : 0) +
+    (item.source === 'hardcover' ? 30 : item.source === 'google' ? 15 : 5) +
+    (!item.id.startsWith('vellum:') ? 10 : 0) +
+    (!hasEditionDecorationInTitle(item.title) ? 8 : 0) +
+    (item.coverUrl ? 5 : 0) +
+    Math.min(20, Math.floor((users || 0) / 50));
+
+  const keepAIdentity =
+    scoreIdentity(a, aEngaged, meta?.aUsersCount) >=
+    scoreIdentity(b, bEngaged, meta?.bUsersCount);
+
+  const primary = keepAIdentity ? a : b;
+  const secondary = keepAIdentity ? b : a;
+
+  const bestStatus =
+    statusPriority(a.readingStatus) >= statusPriority(b.readingStatus)
+      ? a.readingStatus
+      : b.readingStatus;
+
+  const bestDate = pickCanonicalReleaseDate(
+    a,
+    b,
+    todayStr,
+    meta?.aUsersCount,
+    meta?.bUsersCount
+  );
+
+  // Only keep hidden=true if BOTH copies were hidden (so hiding a duplicate paperback doesn't hide the main book!)
+  const mergedHidden = Boolean(a.hidden) && Boolean(b.hidden);
+
+  const aVelTs = a.vellumLastReadAt ? Date.parse(a.vellumLastReadAt) || 0 : 0;
+  const bVelTs = b.vellumLastReadAt ? Date.parse(b.vellumLastReadAt) || 0 : 0;
+  const velPrimary = bVelTs > aVelTs ? b : a;
+
+  const updatedAt = a.updatedAt >= b.updatedAt ? a.updatedAt : b.updatedAt;
+
+  return {
+    ...secondary,
+    ...primary,
+    id: primary.id,
+    title: pickCleanerTitle(primary.title, secondary.title),
+    authorId: primary.authorId || secondary.authorId,
+    coverUrl: primary.coverUrl || secondary.coverUrl,
+    releaseDate: bestDate.releaseDate,
+    datePrecision: bestDate.datePrecision,
+    description:
+      (primary.description?.length || 0) >= (secondary.description?.length || 0)
+        ? primary.description || secondary.description
+        : secondary.description,
+    pageCount: primary.pageCount || secondary.pageCount,
+    isbn: primary.isbn || secondary.isbn,
+    isOneOff:
+      primary.authorId || secondary.authorId
+        ? false
+        : Boolean(primary.isOneOff || secondary.isOneOff),
+    isManual: Boolean(primary.isManual && secondary.isManual),
+    hidden: mergedHidden,
+    readingStatus: bestStatus,
+    addedToTodoAt:
+      bestStatus === 'todo'
+        ? a.addedToTodoAt || b.addedToTodoAt
+        : undefined,
+    finishedAt:
+      bestStatus === 'read'
+        ? a.finishedAt || b.finishedAt
+        : undefined,
+    rating: a.rating ?? b.rating,
+    notes:
+      (a.notes?.length || 0) >= (b.notes?.length || 0)
+        ? a.notes ?? b.notes
+        : b.notes,
+    vellumBookId: velPrimary.vellumBookId || a.vellumBookId || b.vellumBookId,
+    vellumProgress:
+      velPrimary.vellumProgress ?? a.vellumProgress ?? b.vellumProgress,
+    vellumChapter:
+      velPrimary.vellumChapter || a.vellumChapter || b.vellumChapter,
+    vellumLastReadAt:
+      velPrimary.vellumLastReadAt || a.vellumLastReadAt || b.vellumLastReadAt,
+    vellumFormat: velPrimary.vellumFormat || a.vellumFormat || b.vellumFormat,
+    updatedAt,
+  };
+}
+
+/**
+ * Consolidates duplicate editions/republications already in a user's ledger
+ * and returns both the deduplicated array and any absorbed book IDs to clean up in cloud storage.
+ */
+export function consolidateDuplicateBooks(
+  books: BookItem[],
+  todayStr: string
+): { books: BookItem[]; removedIds: string[] } {
+  const result: BookItem[] = [];
+  const removedIds: string[] = [];
+
+  // Bucket by normalized author last-token so pairwise work checks stay O(N) instead of O(N^2)
+  const indicesByAuthorBucket = new Map<string, number[]>();
+
+  const getBucketKey = (authorName: string): string => {
+    const norm = normalizeAuthorCanonicalKey(authorName);
+    const parts = norm.split(' ').filter(Boolean);
+    return parts[parts.length - 1] || norm || '_unknown';
+  };
+
+  for (const item of books) {
+    // Drop pure un-engaged multi-book box sets / summaries / foreign-edition noise
+    const isUnengagedCatalogItem =
+      item.readingStatus === 'none' &&
+      !item.isManual &&
+      !item.isOneOff &&
+      !item.rating &&
+      !item.notes &&
+      !item.vellumBookId;
+
+    if (
+      isUnengagedCatalogItem &&
+      (isLikelyNoiseTitle(item.title, true) ||
+        ( !isAlreadyReleased(item, todayStr) &&
+          isStrictSecondaryReissueTitle(item.title)))
+    ) {
+      removedIds.push(item.id);
+      continue;
+    }
+
+    const bucket = getBucketKey(item.authorName);
+    const candidateIndices = indicesByAuthorBucket.get(bucket) || [];
+
+    let matchedIdx = -1;
+    for (const idx of candidateIndices) {
+      const existing = result[idx];
+      if (
+        existing.id === item.id ||
+        (existing.vellumBookId &&
+          item.vellumBookId &&
+          existing.vellumBookId === item.vellumBookId) ||
+        areSameCanonicalWork(existing, item)
+      ) {
+        matchedIdx = idx;
+        break;
+      }
+    }
+
+    if (matchedIdx >= 0) {
+      const existing = result[matchedIdx];
+      const merged = mergeCanonicalBookPair(existing, item, todayStr);
+      const droppedId = merged.id === existing.id ? item.id : existing.id;
+      if (droppedId !== merged.id) {
+        removedIds.push(droppedId);
+      }
+      result[matchedIdx] = merged;
+    } else {
+      const nextIdx = result.length;
+      result.push({
+        ...item,
+        title: isUnengagedCatalogItem
+          ? cleanDisplayBookTitle(item.title)
+          : item.title,
+      });
+      candidateIndices.push(nextIdx);
+      indicesByAuthorBucket.set(bucket, candidateIndices);
+    }
+  }
+
+  return { books: result, removedIds };
+}

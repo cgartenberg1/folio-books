@@ -1,3 +1,12 @@
+import {
+  areSameCanonicalWork,
+  cleanDisplayBookTitle,
+  getCanonicalWorkKey,
+  isLikelyNoiseTitle,
+  isStrictSecondaryReissueTitle,
+  mergeCanonicalBookPair,
+  normalizeAuthorCanonicalKey,
+} from '@/lib/bookDedupe';
 import { getLocalTodayStr, parseReleaseDateInput } from '@/lib/dates';
 import {
   BookItem,
@@ -52,48 +61,12 @@ function setCachedValue<T>(key: string, value: T, ttlMs = CATALOG_CACHE_TTL_MS):
   });
 }
 
-function normalizeTitleKey(title: string): string {
-  return title
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, '')
-    .replace(/\[[^\]]*\]/g, '')
-    .split(':')[0]
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
 function normalizeAuthorKey(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+  return normalizeAuthorCanonicalKey(name);
 }
 
 function isLikelyNoiseEdition(title: string, filterUntitled = false): boolean {
-  const lower = title.toLowerCase().trim();
-  if (filterUntitled && /^untitled\b/.test(lower)) {
-    return true;
-  }
-  const noisePatterns = [
-    /\bsummary of\b/,
-    /\bstudy guide\b/,
-    /\bworkbook for\b/,
-    /\banalysis of\b/,
-    /\btrivia\b/,
-    /\bboxed set\b/,
-    /\bbox set\b/,
-    /\b\d+-book bundle\b/,
-    /\bcollection:\s*books\b/,
-    /\bomnibus\b/,
-    /\bsampler\b/,
-    /\bcoloring book\b/,
-    /\bdramatized adaptation\b/,
-    /\bgraphicaudio\b/,
-    /\broleplaying game\b/,
-    /\(\d+\s+of\s+\d+\)/,
-    /,\s*part\s+\d+\b/,
-  ];
-  return noisePatterns.some((re) => re.test(lower));
+  return isLikelyNoiseTitle(title, filterUntitled);
 }
 
 function parseHardcoverReleaseDate(
@@ -314,7 +287,6 @@ export async function searchHardcoverCatalog(
     token
   );
 
-  const seenBookKeys = new Set<string>();
   const books: SearchBookResult[] = [];
 
   for (const doc of bookDocs) {
@@ -329,11 +301,16 @@ export async function searchHardcoverCatalog(
     const authorName =
       primaryAuthor?.name || doc.author_names?.[0] || 'Unknown Author';
 
-    const dedupeKey = `${normalizeTitleKey(doc.title)}::${normalizeAuthorKey(
-      authorName
-    )}`;
-    if (seenBookKeys.has(dedupeKey)) continue;
-    seenBookKeys.add(dedupeKey);
+    if (
+      books.some((existing) =>
+        areSameCanonicalWork(
+          existing,
+          { title: doc.title!, authorName }
+        )
+      )
+    ) {
+      continue;
+    }
 
     const coverUrl = doc.image?.url || undefined;
     const parsedDate = parseHardcoverReleaseDate(
@@ -346,7 +323,7 @@ export async function searchHardcoverCatalog(
       id: `hc:book:${doc.id}`,
       source: 'hardcover',
       externalId: String(doc.id),
-      title: doc.title,
+      title: cleanDisplayBookTitle(doc.title),
       authorName,
       authorExternalId:
         primaryAuthor?.id !== undefined ? String(primaryAuthor.id) : undefined,
@@ -477,11 +454,13 @@ export async function searchFallbackCatalog(
 
           if (mode === 'authors') continue;
 
-          const dedupeKey = `${normalizeTitleKey(
-            info.title
-          )}::${normalizeAuthorKey(authorName)}`;
-          if (seenBookKeys.has(dedupeKey)) continue;
-          seenBookKeys.add(dedupeKey);
+          if (
+            books.some((existing) =>
+              areSameCanonicalWork(existing, { title: info.title!, authorName })
+            )
+          ) {
+            continue;
+          }
 
           const parsedDate = parseReleaseDateInput(info.publishedDate);
           const isbn13 = info.industryIdentifiers?.find(
@@ -495,7 +474,7 @@ export async function searchFallbackCatalog(
             id: `gb:book:${item.id}`,
             source: 'google',
             externalId: item.id,
-            title: info.title,
+            title: cleanDisplayBookTitle(info.title),
             authorName,
             authorExternalId: authorName,
             authorSource: 'google',
@@ -599,6 +578,16 @@ interface HardcoverBibBookNode {
   description?: string | null;
   users_count?: number | null;
   image?: { url?: string | null } | null;
+  editions?: Array<{
+    release_date?: string | null;
+  }> | null;
+}
+
+function daysBetweenYmd(earlierYmd: string, laterYmd: string): number {
+  const a = Date.parse(`${earlierYmd}T00:00:00Z`);
+  const b = Date.parse(`${laterYmd}T00:00:00Z`);
+  if (Number.isNaN(a) || Number.isNaN(b)) return 0;
+  return Math.round((b - a) / 86_400_000);
 }
 
 async function fetchHardcoverAuthorBooks(params: {
@@ -643,6 +632,7 @@ async function fetchHardcoverAuthorBooks(params: {
   }
 
   const todayStr = getLocalTodayStr();
+  const currentYear = Number(todayStr.slice(0, 4));
 
   const bibQuery = `
     query AuthorBibliography($hcAuthorId: Int!, $today: date!) {
@@ -670,6 +660,19 @@ async function fetchHardcoverAuthorBooks(params: {
         image {
           url
         }
+        editions(
+          where: {
+            release_date: { _is_null: false }
+            _or: [
+              { language: { code2: { _eq: "en" } } }
+              { language_id: { _is_null: true } }
+            ]
+          }
+          order_by: { release_date: asc }
+          limit: 5
+        ) {
+          release_date
+        }
       }
       released: books(
         where: {
@@ -682,8 +685,8 @@ async function fetchHardcoverAuthorBooks(params: {
           release_date: { _lte: $today }
           ${HARDCOVER_ENGLISH_BOOK_FILTER}
         }
-        order_by: [{ release_date: desc_nulls_last }, { users_count: desc_nulls_last }]
-        limit: 80
+        order_by: [{ users_count: desc_nulls_last }, { release_date: asc_nulls_last }]
+        limit: 150
       ) {
         id
         title
@@ -704,19 +707,63 @@ async function fetchHardcoverAuthorBooks(params: {
     released?: HardcoverBibBookNode[];
   }>(bibQuery, { hcAuthorId: numericAuthorId, today: todayStr }, token);
 
-  const combined = [...(data.upcoming || []), ...(data.released || [])];
-  const nowIso = new Date().toISOString();
-  const deduped = new Map<string, BookItem>();
+  // Process already-released books FIRST so self-pub / first-edition releases establish
+  // the canonical work before any upcoming paperback or traditional retail re-releases.
+  const orderedNodes: Array<{ node: HardcoverBibBookNode; fromUpcoming: boolean }> = [
+    ...(data.released || []).map((node) => ({ node, fromUpcoming: false })),
+    ...(data.upcoming || []).map((node) => ({ node, fromUpcoming: true })),
+  ];
 
-  for (const b of combined) {
+  const nowIso = new Date().toISOString();
+  const deduped: Array<{ book: BookItem; usersCount: number }> = [];
+
+  for (const { node: b, fromUpcoming } of orderedNodes) {
     if (!b.title || isLikelyNoiseEdition(b.title, true)) continue;
-    const normTitle = normalizeTitleKey(b.title);
-    if (!normTitle) continue;
+
+    // Skip secondary format reissues (Trade Paperback, Mass Market, Large Print, Anniversary, Tie-In, etc.)
+    // when they show up as "upcoming" releases.
+    if (fromUpcoming && isStrictSecondaryReissueTitle(b.title)) {
+      continue;
+    }
+
+    const workKey = getCanonicalWorkKey(b.title, authorName);
+    if (!workKey || workKey.startsWith('::')) continue;
 
     const coverUrl = b.image?.url || undefined;
+    const usersCount = typeof b.users_count === 'number' ? b.users_count : 0;
+
+    // Detect single-record republications: if Hardcover bumped `release_date` to a future
+    // traditional/paperback release date, check whether an earlier English edition or original
+    // `release_year` proves the work was already published (backed by real reader activity).
+    let effectiveRawDate = b.release_date;
+    let effectiveRawYear = b.release_year;
+
+    if (fromUpcoming && usersCount >= 12) {
+      const earlierPublishedEdition = (b.editions || [])
+        .map((e) => e.release_date?.trim())
+        .filter((d): d is string => Boolean(d && /^\d{4}-\d{2}-\d{2}$/.test(d)))
+        .find(
+          (d) =>
+            d <= todayStr &&
+            !d.endsWith('-01-01') &&
+            (!b.release_date || daysBetweenYmd(d, b.release_date) >= 60)
+        );
+
+      if (earlierPublishedEdition) {
+        effectiveRawDate = earlierPublishedEdition;
+      } else if (
+        typeof b.release_year === 'number' &&
+        b.release_year >= 1900 &&
+        b.release_year < currentYear
+      ) {
+        effectiveRawDate = undefined;
+        effectiveRawYear = b.release_year;
+      }
+    }
+
     const parsedDate = parseHardcoverReleaseDate(
-      b.release_date,
-      b.release_year,
+      effectiveRawDate,
+      effectiveRawYear,
       Boolean(coverUrl)
     );
 
@@ -724,7 +771,7 @@ async function fetchHardcoverAuthorBooks(params: {
       id: `hc:book:${b.id}`,
       source: 'hardcover',
       externalId: String(b.id),
-      title: b.title,
+      title: cleanDisplayBookTitle(b.title),
       authorName,
       authorId,
       coverUrl,
@@ -738,23 +785,26 @@ async function fetchHardcoverAuthorBooks(params: {
       updatedAt: nowIso,
     };
 
-    const existing = deduped.get(normTitle);
-    if (!existing) {
-      deduped.set(normTitle, candidate);
+    const existingIdx = deduped.findIndex((entry) =>
+      areSameCanonicalWork(entry.book, candidate)
+    );
+
+    if (existingIdx < 0) {
+      deduped.push({ book: candidate, usersCount });
     } else {
-      const existingScore =
-        (existing.coverUrl ? 2 : 0) +
-        (existing.datePrecision === 'day' ? 2 : existing.releaseDate ? 1 : 0);
-      const candidateScore =
-        (candidate.coverUrl ? 2 : 0) +
-        (candidate.datePrecision === 'day' ? 2 : candidate.releaseDate ? 1 : 0);
-      if (candidateScore > existingScore) {
-        deduped.set(normTitle, candidate);
-      }
+      const existing = deduped[existingIdx];
+      const merged = mergeCanonicalBookPair(existing.book, candidate, todayStr, {
+        aUsersCount: existing.usersCount,
+        bUsersCount: usersCount,
+      });
+      deduped[existingIdx] = {
+        book: merged,
+        usersCount: Math.max(existing.usersCount, usersCount),
+      };
     }
   }
 
-  return Array.from(deduped.values());
+  return deduped.map((d) => d.book);
 }
 
 function authorMatchesName(
@@ -814,8 +864,9 @@ async function fetchGoogleFallbackAuthorBooks(params: {
     ...(responses[1]?.items || []),
   ];
 
+  const todayStr = getLocalTodayStr();
   const nowIso = new Date().toISOString();
-  const deduped = new Map<string, BookItem>();
+  const deduped: BookItem[] = [];
 
   for (const item of rawItems) {
     const info = item.volumeInfo;
@@ -824,10 +875,18 @@ async function fetchGoogleFallbackAuthorBooks(params: {
     if (!authorMatchesName(info.authors, authorName)) continue;
     if (isLikelyNoiseEdition(info.title, true)) continue;
 
-    const normTitle = normalizeTitleKey(info.title);
-    if (!normTitle || normTitle.length < 2) continue;
-
     const parsedDate = parseReleaseDateInput(info.publishedDate);
+    if (
+      parsedDate.releaseDate &&
+      parsedDate.releaseDate > todayStr &&
+      isStrictSecondaryReissueTitle(info.title)
+    ) {
+      continue;
+    }
+
+    const workKey = getCanonicalWorkKey(info.title, authorName);
+    if (!workKey || workKey.startsWith('::')) continue;
+
     const coverUrl = cleanGoogleCoverUrl(
       info.imageLinks?.thumbnail || info.imageLinks?.smallThumbnail
     );
@@ -840,7 +899,7 @@ async function fetchGoogleFallbackAuthorBooks(params: {
       id: `gb:book:${item.id}`,
       source: 'google',
       externalId: item.id,
-      title: info.title,
+      title: cleanDisplayBookTitle(info.title),
       authorName,
       authorId,
       coverUrl,
@@ -855,35 +914,21 @@ async function fetchGoogleFallbackAuthorBooks(params: {
       updatedAt: nowIso,
     };
 
-    const existing = deduped.get(normTitle);
-    if (!existing) {
-      deduped.set(normTitle, candidate);
+    const existingIdx = deduped.findIndex((existing) =>
+      areSameCanonicalWork(existing, candidate)
+    );
+    if (existingIdx < 0) {
+      deduped.push(candidate);
     } else {
-      const existingHasCover = Boolean(existing.coverUrl);
-      const candidateHasCover = Boolean(candidate.coverUrl);
-      if (!existingHasCover && candidateHasCover) {
-        deduped.set(normTitle, {
-          ...candidate,
-          releaseDate: candidate.releaseDate || existing.releaseDate,
-          datePrecision:
-            candidate.datePrecision !== 'unknown'
-              ? candidate.datePrecision
-              : existing.datePrecision,
-        });
-      } else if (
-        existing.datePrecision !== 'day' &&
-        candidate.datePrecision === 'day'
-      ) {
-        deduped.set(normTitle, {
-          ...existing,
-          releaseDate: candidate.releaseDate,
-          datePrecision: 'day',
-        });
-      }
+      deduped[existingIdx] = mergeCanonicalBookPair(
+        deduped[existingIdx],
+        candidate,
+        todayStr
+      );
     }
   }
 
-  return Array.from(deduped.values());
+  return deduped;
 }
 
 export async function fetchAuthorBibliography(params: {
@@ -893,6 +938,7 @@ export async function fetchAuthorBibliography(params: {
   externalId?: string;
   hardcoverToken?: string;
   googleApiKey?: string;
+  forceRefresh?: boolean;
 }): Promise<{
   books: BookItem[];
   providerUsed: 'hardcover' | 'google-fallback' | 'manual';
@@ -904,20 +950,23 @@ export async function fetchAuthorBibliography(params: {
     externalId,
     hardcoverToken,
     googleApiKey,
+    forceRefresh = false,
   } = params;
 
-  const bibCacheKey = `bib:en:${source}::${externalId || ''}::${authorName
+  const bibCacheKey = `bib:v2:en:${source}::${externalId || ''}::${authorName
     .trim()
     .toLowerCase()}::${Boolean(hardcoverToken?.trim())}`;
-  const cachedBib = getCachedValue<{
-    books: BookItem[];
-    providerUsed: 'hardcover' | 'google-fallback' | 'manual';
-  }>(bibCacheKey);
-  if (cachedBib) {
-    return {
-      providerUsed: cachedBib.providerUsed,
-      books: cachedBib.books.map((b) => ({ ...b, authorId })),
-    };
+  if (!forceRefresh) {
+    const cachedBib = getCachedValue<{
+      books: BookItem[];
+      providerUsed: 'hardcover' | 'google-fallback' | 'manual';
+    }>(bibCacheKey);
+    if (cachedBib) {
+      return {
+        providerUsed: cachedBib.providerUsed,
+        books: cachedBib.books.map((b) => ({ ...b, authorId })),
+      };
+    }
   }
 
   if (hardcoverToken?.trim()) {

@@ -8,6 +8,7 @@ export async function GET(request: NextRequest) {
   const authorName = searchParams.get('name')?.trim() || '';
   const source = (searchParams.get('source')?.trim() || 'google') as DataSource;
   const externalId = searchParams.get('externalId')?.trim() || undefined;
+  const forceRefresh = searchParams.get('refresh') === '1';
 
   if (!authorId || !authorName) {
     return NextResponse.json(
@@ -28,6 +29,7 @@ export async function GET(request: NextRequest) {
       externalId,
       hardcoverToken,
       googleApiKey,
+      forceRefresh,
     });
     return NextResponse.json(result);
   } catch (error) {

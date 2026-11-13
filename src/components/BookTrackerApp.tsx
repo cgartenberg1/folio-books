@@ -30,6 +30,11 @@ import { ReleasedTab } from '@/components/ReleasedTab';
 import { SearchTab } from '@/components/SearchTab';
 import { UpcomingTab } from '@/components/UpcomingTab';
 import { Fleuron, toRoman } from '@/components/ui';
+import {
+  areSameCanonicalWork,
+  consolidateDuplicateBooks,
+  getCanonicalWorkKey,
+} from '@/lib/bookDedupe';
 import { buildDemoLibrary } from '@/lib/demoLibrary';
 import { format, parseISO } from 'date-fns';
 import {
@@ -89,17 +94,7 @@ const EMPTY_STATE: TrackerState = {
 };
 
 function normBookMatchKey(title: string, authorName: string): string {
-  const cleanTitle = title
-    .toLowerCase()
-    .replace(/\([^)]*\)/g, '')
-    .split(':')[0]
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-  const cleanAuthor = authorName
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-  return `${cleanTitle}::${cleanAuthor}`;
+  return getCanonicalWorkKey(title, authorName);
 }
 
 export function BookTrackerApp() {
@@ -204,9 +199,17 @@ export function BookTrackerApp() {
       } else if (rawState) {
         const parsed = JSON.parse(rawState);
         if (parsed && Array.isArray(parsed.books)) {
+          const localToday = getLocalTodayStr();
+          const { books: cleanedBooks, removedIds } = consolidateDuplicateBooks(
+            parsed.books || [],
+            localToday
+          );
+          if (removedIds.length > 0) {
+            deletedBookIdsRef.current.push(...removedIds);
+          }
           setState({
             authors: parsed.authors || [],
-            books: parsed.books || [],
+            books: cleanedBooks,
             challenges: parsed.challenges || [],
           });
         }
@@ -401,13 +404,39 @@ export function BookTrackerApp() {
           prevOwnerId = localStorage.getItem(LAST_AUTH_USER_KEY);
         } catch {}
 
+        const localToday = getLocalTodayStr();
         if (prevOwnerId && prevOwnerId !== targetUserId) {
           // A different account signed in on this device; load their cloud library cleanly
-          setState(remote);
+          const { books: cleanedRemoteBooks, removedIds } =
+            consolidateDuplicateBooks(remote.books, localToday);
+          setState({ ...remote, books: cleanedRemoteBooks });
+          if (removedIds.length > 0) {
+            await deleteCloudRecords(
+              cfg,
+              targetUserId,
+              'tracked_books',
+              removedIds
+            ).catch(() => {});
+            await pushFullStateToCloud(cfg, targetUserId, {
+              ...remote,
+              books: cleanedRemoteBooks,
+            });
+          }
         } else {
           // Same user or first-time upgrade from local browser state
-          const merged = mergeLocalAndCloudState(stateRef.current, remote);
+          const rawMerged = mergeLocalAndCloudState(stateRef.current, remote);
+          const { books: cleanedMergedBooks, removedIds } =
+            consolidateDuplicateBooks(rawMerged.books, localToday);
+          const merged = { ...rawMerged, books: cleanedMergedBooks };
           setState(merged);
+          if (removedIds.length > 0) {
+            await deleteCloudRecords(
+              cfg,
+              targetUserId,
+              'tracked_books',
+              removedIds
+            ).catch(() => {});
+          }
           await pushFullStateToCloud(cfg, targetUserId, merged);
         }
 
@@ -559,7 +588,7 @@ export function BookTrackerApp() {
 
   // Sync bibliography for a single followed author
   const syncAuthorCatalog = useCallback(
-    async (author: FollowedAuthor, silent = false) => {
+    async (author: FollowedAuthor, silent = false, forceRefresh = false) => {
       setSyncingAuthorIds((prev) => new Set(prev).add(author.id));
       try {
         const headers: Record<string, string> = {};
@@ -574,6 +603,9 @@ export function BookTrackerApp() {
         if (author.externalId) {
           params.set('externalId', author.externalId);
         }
+        if (forceRefresh) {
+          params.set('refresh', '1');
+        }
 
         const res = await fetch(`/api/authors/books?${params.toString()}`, {
           headers,
@@ -585,28 +617,23 @@ export function BookTrackerApp() {
 
         const fetchedBooks: BookItem[] = data.books || [];
         const nowIso = new Date().toISOString();
+        const cloudCleanupIds: string[] = [];
 
         setState((prev) => {
-          const existingById = new Map<string, BookItem>();
-          const existingByNorm = new Map<string, BookItem>();
-          for (const b of prev.books) {
-            existingById.set(b.id, b);
-            existingByNorm.set(normBookMatchKey(b.title, b.authorName), b);
-          }
-
+          const matchedExistingIds = new Set<string>();
           const nextBooksMap = new Map<string, BookItem>();
           for (const b of prev.books) {
             nextBooksMap.set(b.id, b);
           }
 
           for (const incoming of fetchedBooks) {
-            const matched =
-              existingById.get(incoming.id) ||
-              existingByNorm.get(
-                normBookMatchKey(incoming.title, incoming.authorName)
-              );
+            const matched = prev.books.find(
+              (b) =>
+                b.id === incoming.id || areSameCanonicalWork(b, incoming)
+            );
 
             if (matched) {
+              matchedExistingIds.add(matched.id);
               // Preserve user state (readingStatus, hidden, notes, rating, one-off flag)
               const isVellumAutoEntry = matched.id.startsWith('vellum:');
               nextBooksMap.set(matched.id, {
@@ -638,6 +665,36 @@ export function BookTrackerApp() {
             }
           }
 
+          // Prune stale unengaged catalog duplicates previously fetched for this author
+          // that are no longer part of the canonical bibliography
+          if (fetchedBooks.length > 0) {
+            for (const b of prev.books) {
+              const isStaleUnengagedAuthorRow =
+                b.authorId === author.id &&
+                !matchedExistingIds.has(b.id) &&
+                b.readingStatus === 'none' &&
+                !b.hidden &&
+                !b.isManual &&
+                !b.isOneOff &&
+                !b.rating &&
+                !b.notes &&
+                !b.vellumBookId;
+              if (isStaleUnengagedAuthorRow) {
+                nextBooksMap.delete(b.id);
+                cloudCleanupIds.push(b.id);
+              }
+            }
+          }
+
+          const { books: consolidatedBooks, removedIds } =
+            consolidateDuplicateBooks(
+              Array.from(nextBooksMap.values()),
+              todayStr
+            );
+          if (removedIds.length > 0) {
+            cloudCleanupIds.push(...removedIds);
+          }
+
           const updatedAuthors = prev.authors.map((a) =>
             a.id === author.id
               ? { ...a, lastSyncedAt: nowIso, updatedAt: nowIso }
@@ -647,9 +704,21 @@ export function BookTrackerApp() {
           return {
             ...prev,
             authors: updatedAuthors,
-            books: Array.from(nextBooksMap.values()),
+            books: consolidatedBooks,
           };
         });
+
+        if (cloudCleanupIds.length > 0) {
+          deletedBookIdsRef.current.push(...cloudCleanupIds);
+          if (cloudConfig && authUserId) {
+            deleteCloudRecords(
+              cloudConfig,
+              authUserId,
+              'tracked_books',
+              Array.from(new Set(cloudCleanupIds))
+            ).catch(() => {});
+          }
+        }
 
         if (!silent) {
           const upcomingCount = fetchedBooks.filter(
@@ -675,7 +744,7 @@ export function BookTrackerApp() {
         });
       }
     },
-    [settings.hardcoverToken, showToast, todayStr]
+    [settings.hardcoverToken, cloudConfig, authUserId, showToast, todayStr]
   );
 
   const handleSyncAllAuthors = useCallback(async () => {
@@ -683,9 +752,9 @@ export function BookTrackerApp() {
     setIsSyncingAll(true);
     try {
       for (const author of state.authors) {
-        await syncAuthorCatalog(author, true);
+        await syncAuthorCatalog(author, true, true);
       }
-      showToast(`Refreshed releases for ${state.authors.length} authors`);
+      showToast(`Refreshed & deduplicated ${state.authors.length} authors`);
     } finally {
       setIsSyncingAll(false);
     }
@@ -1475,9 +1544,14 @@ export function BookTrackerApp() {
           ];
         }
 
+        const { books: deduplicatedImportBooks } = consolidateDuplicateBooks(
+          Array.from(booksMap.values()),
+          todayStr
+        );
+
         return {
           authors: nextAuthors,
-          books: Array.from(booksMap.values()),
+          books: deduplicatedImportBooks,
           challenges: nextChallenges,
         };
       });
@@ -1817,7 +1891,7 @@ export function BookTrackerApp() {
             todayStr={todayStr}
             syncingAuthorIds={syncingAuthorIds}
             isSyncingAll={isSyncingAll}
-            onSyncAuthor={(author) => syncAuthorCatalog(author, false)}
+            onSyncAuthor={(author) => syncAuthorCatalog(author, false, true)}
             onSyncAllAuthors={handleSyncAllAuthors}
             onUnfollowAuthor={handleUnfollowAuthor}
             onAddManualAuthor={() => setAuthorModalOpen(true)}
