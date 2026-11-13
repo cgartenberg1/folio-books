@@ -31,6 +31,9 @@ import {
   fetchUserFriendGroups,
   joinFriendGroupByCode,
   leaveFriendGroup,
+  signInWithEmailPassword,
+  signUpWithEmailPassword,
+  updateAccountPassword,
 } from '@/lib/cloudSync';
 import { formatReleaseDate } from '@/lib/dates';
 import {
@@ -98,17 +101,22 @@ export function FriendsTab({
 }: FriendsTabProps) {
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
 
-  // Magic Link sign-in form state
+  // Auth sign-in / sign-up form state
+  const [authMode, setAuthMode] = useState<'signin' | 'signup' | 'magic'>('signin');
   const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
   const [nameInput, setNameInput] = useState('');
   const [sendingLink, setSendingLink] = useState(false);
   const [magicLinkSentTo, setMagicLinkSentTo] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
-  // Profile inline editing state
+  // Profile inline editing & password setting state
   const [editingName, setEditingName] = useState(false);
   const [draftDisplayName, setDraftDisplayName] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
+  const [settingPassword, setSettingPassword] = useState(false);
+  const [newAccountPassword, setNewAccountPassword] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
 
   // Friend Groups state
   const [groups, setGroups] = useState<FriendGroup[]>([]);
@@ -285,6 +293,62 @@ export function FriendsTab({
       );
     } finally {
       setSendingLink(false);
+    }
+  };
+
+  const handlePasswordAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cloudConfig || !emailInput.trim() || !passwordInput) return;
+    setSendingLink(true);
+    setAuthError(null);
+    try {
+      if (authMode === 'signin') {
+        await signInWithEmailPassword(
+          cloudConfig,
+          emailInput.trim(),
+          passwordInput
+        );
+        onShowToast('Signed in');
+      } else {
+        const redirectTo =
+          typeof window !== 'undefined' ? window.location.origin : '';
+        const res = await signUpWithEmailPassword(
+          cloudConfig,
+          emailInput.trim(),
+          passwordInput,
+          redirectTo,
+          nameInput.trim() || undefined
+        );
+        if (res.signedInImmediately) {
+          onShowToast('Account created & signed in');
+        } else {
+          setMagicLinkSentTo(emailInput.trim());
+        }
+      }
+    } catch (err) {
+      setAuthError(
+        err instanceof Error ? err.message : 'Authentication failed.'
+      );
+    } finally {
+      setSendingLink(false);
+    }
+  };
+
+  const handleSaveNewPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!cloudConfig || !newAccountPassword) return;
+    setSavingPassword(true);
+    try {
+      await updateAccountPassword(cloudConfig, newAccountPassword);
+      setNewAccountPassword('');
+      setSettingPassword(false);
+      onShowToast('Password saved — you can now sign in with it on any device');
+    } catch (err) {
+      onShowToast(
+        err instanceof Error ? err.message : 'Could not update password'
+      );
+    } finally {
+      setSavingPassword(false);
     }
   };
 
@@ -501,64 +565,111 @@ export function FriendsTab({
                 A letter is on its way.
               </h2>
               <p className="mt-2 font-serif text-[16.5px] leading-relaxed text-ink-muted">
-                We’ve sent a sign-in link to <span className="text-ink">{magicLinkSentTo}</span>.
-                Open it on this device to return here, signed in.
+                We’ve sent a confirmation link to <span className="text-ink">{magicLinkSentTo}</span>.
+                Open it on this device to finish signing in.
               </p>
               <button
                 type="button"
                 onClick={() => setMagicLinkSentTo(null)}
                 className="btn btn-ghost mt-5"
               >
-                Use another address
+                Back to sign in
               </button>
             </div>
           ) : (
-            <form onSubmit={handleMagicLinkSubmit} className="space-y-5">
-              <div>
-                <label className="field-label">Email address</label>
-                <input
-                  type="email"
-                  required
-                  value={emailInput}
-                  onChange={(e) => setEmailInput(e.target.value)}
-                  placeholder="you@example.com"
-                  className="field"
-                />
-              </div>
+            <div className="space-y-6">
+              <Tabline
+                value={authMode}
+                onChange={(next) => {
+                  setAuthMode(next);
+                  setAuthError(null);
+                }}
+                options={[
+                  { key: 'signin', label: 'Sign in' },
+                  { key: 'signup', label: 'Create account' },
+                  { key: 'magic', label: 'Email link' },
+                ]}
+                className="border-b border-rule"
+              />
 
-              <div>
-                <label className="field-label">Your name, as friends will see it</label>
-                <input
-                  type="text"
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="e.g. Chaim"
-                  className="field"
-                />
-              </div>
+              <form
+                onSubmit={
+                  authMode === 'magic'
+                    ? handleMagicLinkSubmit
+                    : handlePasswordAuthSubmit
+                }
+                className="space-y-5"
+              >
+                <div>
+                  <label className="field-label">Email address</label>
+                  <input
+                    type="email"
+                    required
+                    value={emailInput}
+                    onChange={(e) => setEmailInput(e.target.value)}
+                    placeholder="you@example.com"
+                    className="field"
+                  />
+                </div>
 
-              {authError && (
-                <p className="border-l-2 border-claret pl-3 font-serif text-[15px] italic text-claret">
-                  {authError}
-                </p>
-              )}
-
-              <button type="submit" disabled={sendingLink} className="btn btn-primary w-full">
-                {sendingLink ? (
-                  <>
-                    <Loader2 strokeWidth={1.5} className="h-4 w-4 animate-spin" />
-                    Sending…
-                  </>
-                ) : (
-                  'Email me a sign-in link'
+                {authMode !== 'magic' && (
+                  <div>
+                    <label className="field-label">
+                      {authMode === 'signup'
+                        ? 'Choose a password · 6+ characters'
+                        : 'Password'}
+                    </label>
+                    <input
+                      type="password"
+                      required
+                      minLength={6}
+                      value={passwordInput}
+                      onChange={(e) => setPasswordInput(e.target.value)}
+                      placeholder="••••••••"
+                      className="field"
+                    />
+                  </div>
                 )}
-              </button>
 
-              <p className="text-center font-serif text-[14px] italic leading-relaxed text-ink-muted">
-                No password needed. Anything already saved in this browser will be folded into
-                your account when you sign in.
-              </p>
-            </form>
+                {authMode !== 'signin' && (
+                  <div>
+                    <label className="field-label">Your name, as friends will see it</label>
+                    <input
+                      type="text"
+                      value={nameInput}
+                      onChange={(e) => setNameInput(e.target.value)}
+                      placeholder="e.g. Chaim"
+                      className="field"
+                    />
+                  </div>
+                )}
+
+                {authError && (
+                  <p className="border-l-2 border-claret pl-3 font-serif text-[15px] italic text-claret">
+                    {authError}
+                  </p>
+                )}
+
+                <button type="submit" disabled={sendingLink} className="btn btn-primary w-full">
+                  {sendingLink ? (
+                    <>
+                      <Loader2 strokeWidth={1.5} className="h-4 w-4 animate-spin" />
+                      {authMode === 'magic' ? 'Sending…' : 'Signing in…'}
+                    </>
+                  ) : authMode === 'signin' ? (
+                    'Sign in'
+                  ) : authMode === 'signup' ? (
+                    'Create account'
+                  ) : (
+                    'Email me a sign-in link'
+                  )}
+                </button>
+
+                <p className="text-center font-serif text-[14px] italic leading-relaxed text-ink-muted">
+                  Anything already saved in this browser will be folded into your account when you sign in.
+                </p>
+              </form>
+            </div>
           )}
         </div>
       </div>
@@ -658,12 +769,63 @@ export function FriendsTab({
             )}
             {shareActivity ? 'Sharing with your circles' : 'Sharing paused'}
           </button>
+          <button
+            type="button"
+            onClick={() => setSettingPassword((v) => !v)}
+            data-active={settingPassword}
+            className="entry-action"
+          >
+            <KeyRound strokeWidth={1.5} className="h-3.5 w-3.5" />
+            Set password
+          </button>
           <button type="button" onClick={() => onSignOut()} className="entry-action">
             <LogOut strokeWidth={1.5} className="h-3.5 w-3.5" />
             Sign out
           </button>
         </div>
       </div>
+
+      {settingPassword && (
+        <form
+          onSubmit={handleSaveNewPassword}
+          className="panel flex flex-wrap items-end gap-3 p-4 sm:p-5"
+        >
+          <div className="min-w-[220px] flex-1">
+            <label className="field-label">
+              Set a password for instant phone &amp; desktop sign-in (6+ characters)
+            </label>
+            <input
+              type="password"
+              required
+              minLength={6}
+              autoFocus
+              value={newAccountPassword}
+              onChange={(e) => setNewAccountPassword(e.target.value)}
+              placeholder="Choose a password…"
+              className="field field-sm mt-1"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="submit"
+              disabled={savingPassword}
+              className="btn btn-primary btn-sm"
+            >
+              {savingPassword ? 'Saving…' : 'Save password'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSettingPassword(false);
+                setNewAccountPassword('');
+              }}
+              className="btn btn-ghost btn-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
 
       {/* Circle switcher */}
       <div className="space-y-4">

@@ -232,6 +232,75 @@ export async function sendMagicLink(
   }
 }
 
+export async function signInWithEmailPassword(
+  config: CloudConnectionConfig,
+  email: string,
+  password: string
+): Promise<void> {
+  const supabase = getSupabaseClient(config);
+  const cleanEmail = email.trim();
+  if (!cleanEmail || !password) {
+    throw new Error('Please enter both your email and password.');
+  }
+  const { error } = await supabase.auth.signInWithPassword({
+    email: cleanEmail,
+    password,
+  });
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
+export async function signUpWithEmailPassword(
+  config: CloudConnectionConfig,
+  email: string,
+  password: string,
+  redirectTo: string,
+  displayName?: string
+): Promise<{ signedInImmediately: boolean }> {
+  const supabase = getSupabaseClient(config);
+  const cleanEmail = email.trim();
+  if (!cleanEmail) {
+    throw new Error('Please enter your email address.');
+  }
+  if (password.length < 6) {
+    throw new Error('Password must be at least 6 characters.');
+  }
+
+  const { data, error } = await supabase.auth.signUp({
+    email: cleanEmail,
+    password,
+    options: {
+      emailRedirectTo: redirectTo,
+      data: displayName?.trim()
+        ? { display_name: displayName.trim() }
+        : undefined,
+    },
+  });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { signedInImmediately: Boolean(data.session) };
+}
+
+export async function updateAccountPassword(
+  config: CloudConnectionConfig,
+  newPassword: string
+): Promise<void> {
+  if (newPassword.length < 6) {
+    throw new Error('Password must be at least 6 characters.');
+  }
+  const supabase = getSupabaseClient(config);
+  const { error } = await supabase.auth.updateUser({
+    password: newPassword,
+  });
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export async function signOutUser(config: CloudConnectionConfig): Promise<void> {
   const supabase = getSupabaseClient(config);
   const { error } = await supabase.auth.signOut();
