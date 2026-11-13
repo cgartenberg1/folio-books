@@ -1,3 +1,5 @@
+import { cleanDisplayBookTitle } from '@/lib/bookDedupe';
+
 export interface GoodreadsParsedBook {
   rowKey: string;
   goodreadsBookId?: string;
@@ -176,10 +178,12 @@ function cleanGoodreadsHtmlNotes(review?: string, privateNotes?: string): string
 
 function stripSeriesSuffix(title: string): string {
   // Goodreads titles frequently look like "The Way of Kings (The Stormlight Archive, #1)"
-  return title
+  // or "Great Big Beautiful Life: Reese's Book Club"
+  const withoutSeries = title
     .replace(/\s*\([^)]*#\d+[^)]*\)\s*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
+  return cleanDisplayBookTitle(withoutSeries);
 }
 
 export function parseGoodreadsCsv(csvText: string): GoodreadsParseResult {

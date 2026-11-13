@@ -1,8 +1,11 @@
 import {
   areSameCanonicalWork,
   getCanonicalWorkKey,
+  pickCanonicalReleaseDate,
+  pickCleanerTitle,
 } from '@/lib/bookDedupe';
 import { isCustomCoverUrl } from '@/lib/coverArt';
+import { getLocalTodayStr } from '@/lib/dates';
 import { BookItem, ReadingChallenge, ReadingStatus } from '@/types/books';
 
 export interface VellumSyncBookPayload {
@@ -67,21 +70,27 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
   const bVelTs = toTimestamp(b.vellumLastReadAt);
   const velSource = bVelTs >= aVelTs ? b : a;
 
+  const primaryHasManualDate =
+    Boolean(primary.isManual && !primary.id.startsWith('vellum:') && primary.releaseDate);
+  const bestDate = primaryHasManualDate
+    ? { releaseDate: primary.releaseDate, datePrecision: primary.datePrecision }
+    : pickCanonicalReleaseDate(a, b, getLocalTodayStr());
+
   return {
     ...secondary,
     ...primary,
     id: a.id, // preserve stable original ID in Folio
+    title:
+      primary.isManual && !primary.id.startsWith('vellum:')
+        ? primary.title
+        : pickCleanerTitle(primary.title, secondary.title),
     authorId: primary.authorId || secondary.authorId,
     coverUrl:
       isCustomCoverUrl(secondary.coverUrl) && !isCustomCoverUrl(primary.coverUrl)
         ? secondary.coverUrl
         : primary.coverUrl || secondary.coverUrl,
-    releaseDate:
-      primary.releaseDate && primary.releaseDate.length >= (secondary.releaseDate?.length || 0)
-        ? primary.releaseDate
-        : secondary.releaseDate || primary.releaseDate,
-    datePrecision:
-      primary.datePrecision !== 'unknown' ? primary.datePrecision : secondary.datePrecision,
+    releaseDate: bestDate.releaseDate,
+    datePrecision: bestDate.datePrecision,
     description: primary.description || secondary.description,
     pageCount: primary.pageCount || secondary.pageCount,
     isbn: primary.isbn || secondary.isbn,

@@ -34,8 +34,12 @@ import {
   areSameCanonicalWork,
   consolidateDuplicateBooks,
   getCanonicalWorkKey,
+  hasEditionDecorationInTitle,
+  isStrictSecondaryReissueTitle,
+  pickCanonicalReleaseDate,
+  pickCleanerTitle,
 } from '@/lib/bookDedupe';
-import { isCustomCoverUrl } from '@/lib/coverArt';
+import { isCustomCoverUrl, pickPreferredCoverUrl } from '@/lib/coverArt';
 import { buildDemoLibrary } from '@/lib/demoLibrary';
 import { format, parseISO } from 'date-fns';
 import {
@@ -637,25 +641,34 @@ export function BookTrackerApp() {
               matchedExistingIds.add(matched.id);
               // Preserve user state (readingStatus, hidden, notes, rating, one-off flag)
               const isVellumAutoEntry = matched.id.startsWith('vellum:');
+              const isUserManualEntry = Boolean(
+                matched.isManual && !isVellumAutoEntry
+              );
+              const bestDate =
+                isUserManualEntry && matched.releaseDate
+                  ? {
+                      releaseDate: matched.releaseDate,
+                      datePrecision: matched.datePrecision,
+                    }
+                  : pickCanonicalReleaseDate(matched, incoming, todayStr);
+
               nextBooksMap.set(matched.id, {
                 ...matched,
+                title: isUserManualEntry
+                  ? matched.title
+                  : pickCleanerTitle(matched.title, incoming.title),
                 authorId: matched.authorId || author.id,
                 coverUrl: isCustomCoverUrl(matched.coverUrl)
                   ? matched.coverUrl
-                  : incoming.coverUrl || matched.coverUrl,
+                  : pickPreferredCoverUrl(
+                      incoming.coverUrl,
+                      matched.coverUrl,
+                      incoming.title,
+                      matched.title
+                    ) || incoming.coverUrl || matched.coverUrl,
                 isbn: matched.isbn || incoming.isbn,
-                releaseDate:
-                  matched.isManual && matched.releaseDate && !isVellumAutoEntry
-                    ? matched.releaseDate
-                    : incoming.releaseDate || matched.releaseDate,
-                datePrecision:
-                  matched.isManual &&
-                  matched.datePrecision !== 'unknown' &&
-                  !isVellumAutoEntry
-                    ? matched.datePrecision
-                    : incoming.datePrecision !== 'unknown'
-                    ? incoming.datePrecision
-                    : matched.datePrecision,
+                releaseDate: bestDate.releaseDate,
+                datePrecision: bestDate.datePrecision,
                 description: matched.description || incoming.description,
                 pageCount: matched.pageCount || incoming.pageCount,
                 updatedAt: nowIso,
@@ -751,18 +764,236 @@ export function BookTrackerApp() {
     [settings.hardcoverToken, cloudConfig, authUserId, showToast, todayStr]
   );
 
+  // Repairs missing/placeholder release dates, 2026 paperback reissues of 2025 hardcovers,
+  // and Book Club edition suffixes across existing tracked & one-off books in the ledger.
+  const ledgerRepairRunningRef = useRef(false);
+
+  const repairTrackedBookDatesAndReissues = useCallback(async () => {
+    if (demoMode || ledgerRepairRunningRef.current) return 0;
+    ledgerRepairRunningRef.current = true;
+
+    try {
+      const localToday = getLocalTodayStr();
+      const candidates = stateRef.current.books
+        .filter((b) => {
+          if (b.id.startsWith('demo:')) return false;
+          if (b.isManual && !b.id.startsWith('vellum:')) return false;
+          if (!b.releaseDate || b.datePrecision !== 'day') return true;
+          if (/-(01-01|12-31)$/.test(b.releaseDate)) return true;
+          if (b.releaseDate >= '2026') return true;
+          if (
+            hasEditionDecorationInTitle(b.title) ||
+            isStrictSecondaryReissueTitle(b.title)
+          ) {
+            return true;
+          }
+          return false;
+        })
+        .sort((a, b) => Number(Boolean(a.hidden)) - Number(Boolean(b.hidden)))
+        .slice(0, 180);
+
+      if (candidates.length === 0) return 0;
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      const hcTok = settingsRef.current.hardcoverToken?.trim();
+      if (hcTok) {
+        headers['x-hardcover-token'] = hcTok;
+      }
+
+      let updatedCount = 0;
+      const chunkSize = 45;
+
+      for (let i = 0; i < candidates.length; i += chunkSize) {
+        const slice = candidates.slice(i, i + chunkSize);
+        const items = slice.map((b) => ({
+          clientKey: b.id,
+          title: b.title,
+          authorName: b.authorName,
+          isbn13: b.isbn && b.isbn.length === 13 ? b.isbn : undefined,
+          isbn10: b.isbn && b.isbn.length === 10 ? b.isbn : undefined,
+        }));
+
+        const res = await fetch('/api/import/enrich', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ action: 'books', items }),
+        });
+        if (!res.ok) continue;
+        const payload = await res.json();
+        const matches = payload?.matches || {};
+        if (Object.keys(matches).length === 0) continue;
+
+        const nowIso = new Date().toISOString();
+        const removedBatchIds: string[] = [];
+
+        setState((prev) => {
+          let changedInBatch = false;
+          const nextBooks = prev.books.map((b) => {
+            const m = matches[b.id];
+            if (!m) return b;
+            if (b.isManual && !b.id.startsWith('vellum:')) return b;
+
+            const bestDate = pickCanonicalReleaseDate(
+              b,
+              {
+                ...b,
+                title: m.title || b.title,
+                releaseDate: m.releaseDate,
+                datePrecision: m.datePrecision,
+                isManual: false,
+              },
+              localToday
+            );
+            const nextTitle = pickCleanerTitle(b.title, m.title || b.title);
+            const nextCover = isCustomCoverUrl(b.coverUrl)
+              ? b.coverUrl
+              : pickPreferredCoverUrl(
+                  b.coverUrl,
+                  m.coverUrl,
+                  b.title,
+                  m.title || b.title
+                ) || b.coverUrl || m.coverUrl;
+            const nextIsbn = b.isbn || m.isbn;
+            const nextPages = b.pageCount || m.pageCount;
+
+            const didChange =
+              nextTitle !== b.title ||
+              bestDate.releaseDate !== b.releaseDate ||
+              bestDate.datePrecision !== b.datePrecision ||
+              nextCover !== b.coverUrl ||
+              nextIsbn !== b.isbn ||
+              nextPages !== b.pageCount;
+
+            if (!didChange) return b;
+            changedInBatch = true;
+            updatedCount += 1;
+
+            return {
+              ...b,
+              title: nextTitle,
+              releaseDate: bestDate.releaseDate,
+              datePrecision: bestDate.datePrecision,
+              coverUrl: nextCover,
+              isbn: nextIsbn,
+              pageCount: nextPages,
+              updatedAt: nowIso,
+            };
+          });
+
+          if (!changedInBatch) return prev;
+
+          const { books: consolidated, removedIds } = consolidateDuplicateBooks(
+            nextBooks,
+            localToday
+          );
+          if (removedIds.length > 0) {
+            removedBatchIds.push(...removedIds);
+          }
+
+          return {
+            ...prev,
+            books: consolidated,
+          };
+        });
+
+        if (removedBatchIds.length > 0) {
+          deletedBookIdsRef.current.push(...removedBatchIds);
+          if (cloudConfig && authUserId) {
+            deleteCloudRecords(
+              cloudConfig,
+              authUserId,
+              'tracked_books',
+              Array.from(new Set(removedBatchIds))
+            ).catch(() => {});
+          }
+        }
+      }
+
+      return updatedCount;
+    } catch {
+      return 0;
+    } finally {
+      ledgerRepairRunningRef.current = false;
+    }
+  }, [demoMode, cloudConfig, authUserId]);
+
+  // Run one-time automatic background repair on existing ledgers so 2026 trade paperbacks,
+  // Book Club reissues, and missing Google Books dates fix themselves without manual intervention.
+  useEffect(() => {
+    if (!mounted || demoMode) return;
+    if (cloudConfig && (!authUserId || cloudSyncStatus !== 'synced')) return;
+    if (
+      stateRef.current.books.length === 0 &&
+      stateRef.current.authors.length === 0
+    ) {
+      return;
+    }
+
+    const repairKey = `folio:ledger-repair:v2:${authUserId || 'local'}`;
+    try {
+      if (localStorage.getItem(repairKey) === '1') return;
+      localStorage.setItem(repairKey, '1');
+    } catch {
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      await repairTrackedBookDatesAndReissues();
+      const authorsSnapshot = [...stateRef.current.authors];
+      for (let i = 0; i < authorsSnapshot.length; i++) {
+        if (cancelled) break;
+        await syncAuthorCatalog(authorsSnapshot[i], true, true);
+        if (i + 1 < authorsSnapshot.length) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    mounted,
+    demoMode,
+    cloudConfig,
+    authUserId,
+    cloudSyncStatus,
+    repairTrackedBookDatesAndReissues,
+    syncAuthorCatalog,
+  ]);
+
   const handleSyncAllAuthors = useCallback(async () => {
-    if (state.authors.length === 0 || isSyncingAll) return;
+    if (
+      (state.authors.length === 0 && state.books.length === 0) ||
+      isSyncingAll
+    ) {
+      return;
+    }
     setIsSyncingAll(true);
     try {
       for (const author of state.authors) {
         await syncAuthorCatalog(author, true, true);
       }
-      showToast(`Refreshed & deduplicated ${state.authors.length} authors`);
+      await repairTrackedBookDatesAndReissues();
+      showToast(
+        state.authors.length > 0
+          ? `Refreshed & deduplicated ${state.authors.length} authors + tracked dates`
+          : 'Refreshed tracked book release dates'
+      );
     } finally {
       setIsSyncingAll(false);
     }
-  }, [state.authors, isSyncingAll, syncAuthorCatalog, showToast]);
+  }, [
+    state.authors,
+    state.books.length,
+    isSyncingAll,
+    syncAuthorCatalog,
+    repairTrackedBookDatesAndReissues,
+    showToast,
+  ]);
 
   const handleFollowSearchAuthor = useCallback(
     async (candidate: SearchAuthorResult) => {

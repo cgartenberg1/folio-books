@@ -52,7 +52,7 @@ const STRICT_SECONDARY_REISSUE_PATTERNS: RegExp[] = [
   /\bmass\s+market(\s+paperback)?\b/i,
   /\bpaperback\s+edition\b/i,
   /\(\s*(tpb|mmpb|paperback|mass\s+market|large\s+print)\s*\)/i,
-  /(?::|-|–|—)\s*paperback$/i,
+  /(?::|-|–|—)\s*(?:trade\s+|mass\s+market\s+)?paperback$/i,
   /\blarge\s+print\b/i,
   /\blarge\s+type\b/i,
   /\bdyslexic\s+edition\b/i,
@@ -67,10 +67,17 @@ const STRICT_SECONDARY_REISSUE_PATTERNS: RegExp[] = [
   /\bupdated\s+edition\b/i,
   /\bexpanded\s+edition\b/i,
   /\brestored\s+edition\b/i,
-  /\b(movie|film|tv|television|netflix|hbo|prime)\s+tie-?in\b/i,
+  /\b(movie|film|tv|television|netflix|hbo|prime|apple\s+tv\+?|disney\+?)\s+tie-?in\b/i,
   /\bnow\s+a\s+major\s+motion\s+picture\b/i,
   /\bsoon\s+to\s+be\s+a\s+major\s+motion\s+picture\b/i,
-  /\bbook\s+club\s+edition\b/i,
+  /\breese'?s\s+book\s+club(?:\s+(?:pick|edition|selection))?\b/i,
+  /\boprah'?s\s+book\s+club(?:\s+(?:pick|edition|selection))?\b/i,
+  /\b(?:read\s+with\s+jenna|jenna'?s\s+book\s+club)(?:\s+(?:pick|edition|selection))?\b/i,
+  /\b(?:good\s+morning\s+america|gma)\s+book\s+club(?:\s+(?:pick|edition|selection))?\b/i,
+  /\b(?:richard\s*(?:&|and)\s*judy|target|barnes\s*(?:&|and)\s*noble|b&n|waterstones|indie|spotify|service95|fallon|jimmy\s+fallon'?s?|dakota'?s|dua\s+lipa'?s)\s+book\s+club(?:\s+(?:pick|edition|selection))?\b/i,
+  /\b[a-z]{2,18}(?:'s|’s)\s+book\s+club(?:\s+(?:pick|edition|selection))?\b/i,
+  /\bbook\s+club\s+(?:edition|pick|selection|favorites?)\b/i,
+  /\btiktok\s+made\s+me\s+buy\s+it\b/i,
   /\bleatherbound(\s+edition)?\b/i,
   /\bfolio\s+society\b/i,
   /\bpenguin\s+(classics|clothbound)\b/i,
@@ -115,7 +122,7 @@ const EDITION_DECORATION_PATTERNS: RegExp[] = [
 ];
 
 const DESCRIPTIVE_SUBTITLE_RE =
-  /\b(novel|novella|story|stories|tale|tales|thriller|mystery|romance|memoir|biography|autobiography|fantasy|litrpg|saga|chronicles|trilogy|duology|series|edition|paperback|hardcover|reissue|guide|handbook|history|life\s+and\s+times)\b/i;
+  /\b(novel|novella|story|stories|tale|tales|thriller|mystery|romance|memoir|biography|autobiography|fantasy|litrpg|saga|chronicles|trilogy|duology|series|edition|paperback|hardcover|reissue|guide|handbook|history|life\s+and\s+times|book\s+club|pick|bestseller)\b/i;
 
 export function isLikelyNoiseTitle(title: string, filterUntitled = false): boolean {
   const trimmed = (title || '').trim();
@@ -133,7 +140,11 @@ export function isStrictSecondaryReissueTitle(title: string): boolean {
 export function hasEditionDecorationInTitle(title: string): boolean {
   const t = title || '';
   if (EDITION_DECORATION_PATTERNS.some((re) => re.test(t))) return true;
-  if (/\([^)]*(edition|paperback|hardcover|reissue|tie-?in|exclusive|print|#[0-9]+)[^)]*\)/i.test(t)) {
+  if (
+    /\([^)]*(edition|paperback|hardcover|reissue|tie-?in|exclusive|print|book\s+club|#[0-9]+)[^)]*\)/i.test(
+      t
+    )
+  ) {
     return true;
   }
   return false;
@@ -147,9 +158,19 @@ export function cleanDisplayBookTitle(rawTitle: string): string {
   let t = (rawTitle || '').trim();
   if (!t) return t;
 
-  // Remove parenthetical/bracketed blocks that only contain edition, format, or Goodreads series (#1) metadata
+  // Remove parenthetical/bracketed blocks that only contain edition, format, book club, or Goodreads series (#1) metadata
   t = t.replace(
-    /\s*[\(\[][^\)\]]*(?:edition|paperback|hardcover|hardback|large\s+print|reissue|repackage|tie-?in|exclusive|sprayed\s+edges|leatherbound|clothbound|unabridged|anniversary|fairyloot|illumicrate|owlcrate|#\s*\d+|book\s+\d+|vol\.?\s*\d+)[^\)\]]*[\)\]]/gi,
+    /\s*[\(\[][^\)\]]*(?:edition|paperback|hardcover|hardback|large\s+print|reissue|repackage|tie-?in|exclusive|sprayed\s+edges|leatherbound|clothbound|unabridged|anniversary|fairyloot|illumicrate|owlcrate|book\s+club|#\s*\d+|book\s+\d+|vol\.?\s*\d+)[^\)\]]*[\)\]]/gi,
+    ''
+  );
+
+  // Strip explicit trailing ": Paperback", ": Trade Paperback", or ": Reese's Book Club" tags
+  t = t.replace(
+    /\s*(?::|—|–|-|\/)\s*(?:trade\s+|mass\s+market\s+)?paperback\s*$/i,
+    ''
+  );
+  t = t.replace(
+    /\s*(?::|—|–|-|\/)\s*(?:a\s+)?[a-z0-9'’&.\s]{0,28}\bbook\s+club(?:\s+(?:pick|edition|selection))?\s*$/i,
     ''
   );
 
@@ -375,6 +396,34 @@ function normalizedSortableDate(
   return releaseDate;
 }
 
+/**
+ * Downgrades catalog placeholder dates (`YYYY-01-01` for >=2020 or `YYYY-12-31` for >=currentYear)
+ * into year-only precision so they neither display as fake Jan 1 / Dec 31 dates nor block real dates.
+ */
+export function sanitizeCatalogReleaseDate(
+  releaseDate?: string,
+  datePrecision: DatePrecision = 'unknown',
+  currentYear = new Date().getFullYear()
+): { releaseDate?: string; datePrecision: DatePrecision } {
+  if (!releaseDate) {
+    return { releaseDate: undefined, datePrecision: 'unknown' };
+  }
+  if (datePrecision === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(releaseDate)) {
+    const yearNum = Number(releaseDate.slice(0, 4));
+    const md = releaseDate.slice(5);
+    if (
+      (md === '01-01' && yearNum >= 2020) ||
+      (md === '12-31' && yearNum >= currentYear)
+    ) {
+      return {
+        releaseDate: String(yearNum),
+        datePrecision: 'year',
+      };
+    }
+  }
+  return { releaseDate, datePrecision };
+}
+
 function isAlreadyReleased(
   book: Pick<BookItem, 'releaseDate' | 'datePrecision'>,
   todayStr: string
@@ -388,13 +437,24 @@ function isAlreadyReleased(
   return false;
 }
 
-function pickCanonicalReleaseDate(
-  a: BookItem,
-  b: BookItem,
+export function pickCanonicalReleaseDate(
+  rawA: BookItem,
+  rawB: BookItem,
   todayStr: string,
   aUsersCount?: number,
   bUsersCount?: number
 ): { releaseDate?: string; datePrecision: DatePrecision } {
+  const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
+  const sanA = rawA.isManual
+    ? { releaseDate: rawA.releaseDate, datePrecision: rawA.datePrecision }
+    : sanitizeCatalogReleaseDate(rawA.releaseDate, rawA.datePrecision, currentYear);
+  const sanB = rawB.isManual
+    ? { releaseDate: rawB.releaseDate, datePrecision: rawB.datePrecision }
+    : sanitizeCatalogReleaseDate(rawB.releaseDate, rawB.datePrecision, currentYear);
+
+  const a: BookItem = { ...rawA, ...sanA };
+  const b: BookItem = { ...rawB, ...sanB };
+
   if (!a.releaseDate) {
     return { releaseDate: b.releaseDate, datePrecision: b.datePrecision };
   }
@@ -485,7 +545,7 @@ function statusPriority(status: ReadingStatus): number {
   return 1;
 }
 
-function pickCleanerTitle(aTitle: string, bTitle: string): string {
+export function pickCleanerTitle(aTitle: string, bTitle: string): string {
   const cleanA = cleanDisplayBookTitle(aTitle);
   const cleanB = cleanDisplayBookTitle(bTitle);
   const aDecorated = hasEditionDecorationInTitle(aTitle);
@@ -621,7 +681,22 @@ export function consolidateDuplicateBooks(
     return parts[parts.length - 1] || norm || '_unknown';
   };
 
-  for (const item of books) {
+  const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
+
+  for (const rawItem of books) {
+    const sanitizedDate = rawItem.isManual
+      ? { releaseDate: rawItem.releaseDate, datePrecision: rawItem.datePrecision }
+      : sanitizeCatalogReleaseDate(
+          rawItem.releaseDate,
+          rawItem.datePrecision,
+          currentYear
+        );
+    const item: BookItem = {
+      ...rawItem,
+      ...sanitizedDate,
+      title: rawItem.isManual ? rawItem.title : cleanDisplayBookTitle(rawItem.title),
+    };
+
     // Drop pure un-engaged multi-book box sets / summaries / foreign-edition noise
     const isUnengagedCatalogItem =
       item.readingStatus === 'none' &&
@@ -633,9 +708,9 @@ export function consolidateDuplicateBooks(
 
     if (
       isUnengagedCatalogItem &&
-      (isLikelyNoiseTitle(item.title, true) ||
-        ( !isAlreadyReleased(item, todayStr) &&
-          isStrictSecondaryReissueTitle(item.title)))
+      (isLikelyNoiseTitle(rawItem.title, true) ||
+        (!isAlreadyReleased(item, todayStr) &&
+          isStrictSecondaryReissueTitle(rawItem.title)))
     ) {
       removedIds.push(item.id);
       continue;
@@ -669,12 +744,7 @@ export function consolidateDuplicateBooks(
       result[matchedIdx] = merged;
     } else {
       const nextIdx = result.length;
-      result.push({
-        ...item,
-        title: isUnengagedCatalogItem
-          ? cleanDisplayBookTitle(item.title)
-          : item.title,
-      });
+      result.push(item);
       candidateIndices.push(nextIdx);
       indicesByAuthorBucket.set(bucket, candidateIndices);
     }
