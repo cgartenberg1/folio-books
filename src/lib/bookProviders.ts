@@ -1518,8 +1518,13 @@ async function lookupBestGoogleBookMatch(params: {
     todayStr = getLocalTodayStr(),
   } = params;
   const cleanedTitle = cleanDisplayBookTitle(title);
-  const rawHead =
-    cleanedTitle.split(/\s*[:—–(]\s*/)[0].trim() || cleanedTitle || title.trim();
+  const rawHead = (
+    cleanedTitle.split(/\s*[:—–(]\s*/)[0].trim() ||
+    cleanedTitle ||
+    title.trim()
+  )
+    .replace(/['’‘`]/g, "'")
+    .replace(/"/g, '');
   if (!rawHead) return null;
 
   const normAuthor = normalizeAuthorKey(authorName || '');
@@ -1544,11 +1549,11 @@ async function lookupBestGoogleBookMatch(params: {
     }
   };
 
-  // Query by title + author surname first so we see ALL editions (hardcover + paperback)
-  // rather than only a single paperback ISBN!
+  // Query by quoted phrase + author surname first so we see ALL editions (hardcover + paperback)
+  // without Google Books' intitle:"..." stop-word/apostrophe quirks dropping hits.
   const primaryQuery = lastAuthorToken
-    ? `intitle:"${rawHead}" inauthor:${lastAuthorToken}`
-    : `intitle:"${rawHead}"`;
+    ? `"${rawHead}" inauthor:${lastAuthorToken}`
+    : `"${rawHead}"`;
 
   let rawItems = await fetchVolumes(primaryQuery);
 
@@ -1613,6 +1618,12 @@ async function lookupBestGoogleBookMatch(params: {
   };
 
   let candidates = filterMatchingVolumes(rawItems);
+
+  if (candidates.length === 0) {
+    const looseQuery = authorName ? `${rawHead} ${authorName}` : rawHead;
+    rawItems = await fetchVolumes(looseQuery);
+    candidates = filterMatchingVolumes(rawItems);
+  }
 
   if (candidates.length === 0 && (isbn13 || isbn10)) {
     rawItems = await fetchVolumes(`isbn:${isbn13 || isbn10}`);
@@ -2381,6 +2392,124 @@ export async function enrichBooksBatch(params: {
       })
     );
     if (i + googleChunkSize < needsGoogleVerify.length) {
+      await sleepMs(100);
+    }
+  }
+
+  // Pass 4: OpenLibrary first_publish_year fallback for backlist / library MARC / indie titles
+  // that still have no publication date after Hardcover + Google Books.
+  const stillMissingDates = items.filter(
+    (it) => !matches[it.clientKey]?.releaseDate
+  );
+  const olChunkSize = 8;
+
+  for (let i = 0; i < stillMissingDates.length; i += olChunkSize) {
+    const slice = stillMissingDates.slice(i, i + olChunkSize);
+    await Promise.all(
+      slice.map(async (item) => {
+        try {
+          const existing = matches[item.clientKey];
+          const baseTitle = existing?.title || item.title;
+          const baseAuthor = existing?.authorName || item.authorName || '';
+          const cleanedTitle = cleanDisplayBookTitle(baseTitle);
+          const rawHead = (
+            cleanedTitle.split(/\s*[:—–(]\s*/)[0].trim() ||
+            cleanedTitle ||
+            baseTitle.trim()
+          )
+            .replace(/['’‘`]/g, "'")
+            .replace(/"/g, '');
+          if (!rawHead) return;
+
+          const authorTokens = normalizeAuthorKey(baseAuthor)
+            .split(' ')
+            .filter(Boolean);
+          const lastAuthorToken = authorTokens[authorTokens.length - 1] || '';
+          const authorParam = lastAuthorToken
+            ? `&author=${encodeURIComponent(lastAuthorToken)}`
+            : '';
+          const olUrl = `https://openlibrary.org/search.json?title=${encodeURIComponent(
+            rawHead
+          )}${authorParam}&limit=5&fields=key,title,author_name,first_publish_year,cover_i,isbn`;
+
+          const res = await fetch(olUrl, { cache: 'no-store' });
+          if (!res.ok) return;
+          const json = await res.json();
+          const docs: Array<{
+            key?: string;
+            title?: string;
+            author_name?: string[];
+            first_publish_year?: number;
+            cover_i?: number;
+            isbn?: string[];
+          }> = Array.isArray(json?.docs) ? json.docs : [];
+
+          for (const doc of docs) {
+            if (!doc.title) continue;
+            if (baseAuthor && !authorMatchesName(doc.author_name, baseAuthor)) {
+              continue;
+            }
+            const resolvedAuthor =
+              doc.author_name?.[0] || baseAuthor || 'Unknown Author';
+            if (
+              !areSameCanonicalWork(
+                { title: doc.title, authorName: resolvedAuthor },
+                { title: baseTitle, authorName: baseAuthor || resolvedAuthor }
+              )
+            ) {
+              continue;
+            }
+
+            const yr =
+              typeof doc.first_publish_year === 'number' &&
+              doc.first_publish_year >= 1800 &&
+              doc.first_publish_year <= 2100
+                ? String(doc.first_publish_year)
+                : undefined;
+            if (!yr) continue;
+
+            const olCover = doc.cover_i
+              ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
+              : undefined;
+            const olIsbn = doc.isbn?.find(
+              (code) => code.length === 13 || code.length === 10
+            );
+            const workKey = (doc.key || rawHead).replace(/^\/works\//, '');
+
+            if (!existing) {
+              matches[item.clientKey] = {
+                clientKey: item.clientKey,
+                id: `ol:book:${workKey}`,
+                source: 'openlibrary',
+                externalId: workKey,
+                title: pickCleanerTitle(item.title, cleanDisplayBookTitle(doc.title)),
+                authorName: resolvedAuthor,
+                coverUrl: olCover,
+                releaseDate: yr,
+                datePrecision: 'year',
+                isbn: olIsbn || item.isbn13 || item.isbn10,
+              };
+            } else {
+              matches[item.clientKey] = {
+                ...existing,
+                title: pickCleanerTitle(
+                  existing.title,
+                  cleanDisplayBookTitle(doc.title)
+                ),
+                coverUrl: existing.coverUrl || olCover,
+                releaseDate: yr,
+                datePrecision: 'year',
+                isbn: existing.isbn || olIsbn,
+              };
+            }
+            break;
+          }
+        } catch {
+          // Ignore individual OpenLibrary lookup error
+        }
+      })
+    );
+    if (i + olChunkSize < stillMissingDates.length) {
       await sleepMs(100);
     }
   }

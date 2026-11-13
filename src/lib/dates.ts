@@ -7,7 +7,7 @@ import {
   parseISO,
   startOfWeek,
 } from 'date-fns';
-import { BookItem, DatePrecision } from '@/types/books';
+import { BookItem, DatePrecision, ReadingStatus } from '@/types/books';
 
 export interface WeekBucket {
   key: string;
@@ -80,12 +80,39 @@ export function parseReleaseDateInput(
 }
 
 export function classifyReleaseTiming(
-  book: Pick<BookItem, 'releaseDate' | 'datePrecision'>,
+  book: {
+    id?: string;
+    releaseDate?: string;
+    datePrecision: DatePrecision;
+    readingStatus?: ReadingStatus;
+    finishedAt?: string;
+    isManual?: boolean;
+    vellumBookId?: string;
+    vellumProgress?: number;
+  },
   todayStr: string
 ): 'upcoming' | 'released' {
+  // Any book already marked Read, finished on/before today, or opened in the Vellum ebook reader
+  // has undeniably been published and never belongs on the Upcoming release calendar.
+  if (
+    book.readingStatus === 'read' ||
+    Boolean(book.finishedAt && book.finishedAt <= todayStr) ||
+    Boolean(book.vellumBookId) ||
+    Boolean(book.id?.startsWith('vellum:')) ||
+    (typeof book.vellumProgress === 'number' && book.vellumProgress > 0)
+  ) {
+    return 'released';
+  }
+
   const { releaseDate, datePrecision } = book;
   if (!releaseDate || datePrecision === 'unknown') {
-    return 'upcoming';
+    // Only hand-entered forthcoming titles (or demo placeholders) stay in Upcoming as "Date TBA".
+    // Undated catalog/Goodreads backlist entries belong in Released ("Undated") until enriched.
+    const isHandEnteredAnnouncement = Boolean(
+      (book.isManual && book.id?.startsWith('manual:book:')) ||
+        book.id?.startsWith('demo:')
+    );
+    return isHandEnteredAnnouncement ? 'upcoming' : 'released';
   }
 
   if (datePrecision === 'day') {

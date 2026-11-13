@@ -545,6 +545,18 @@ function statusPriority(status: ReadingStatus): number {
   return 1;
 }
 
+function countProperCapitalizedWords(title: string): number {
+  const words = title.split(/\s+/).filter(Boolean);
+  let count = 0;
+  for (let i = 1; i < words.length; i++) {
+    const cleanWord = words[i].replace(/^[^A-Za-z]+/, '');
+    if (cleanWord.length >= 4 && /^[A-Z]/.test(cleanWord)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 export function pickCleanerTitle(aTitle: string, bTitle: string): string {
   const cleanA = cleanDisplayBookTitle(aTitle);
   const cleanB = cleanDisplayBookTitle(bTitle);
@@ -553,6 +565,16 @@ export function pickCleanerTitle(aTitle: string, bTitle: string): string {
 
   if (aDecorated && !bDecorated) return cleanB;
   if (bDecorated && !aDecorated) return cleanA;
+
+  // Upgrade MARC/library sentence-case titles ("The pickle index", "Traitor's son")
+  // to proper Title Case ("The Pickle Index", "Traitor's Son") when otherwise equivalent
+  if (cleanA.toLowerCase() === cleanB.toLowerCase()) {
+    return countProperCapitalizedWords(cleanB) >
+      countProperCapitalizedWords(cleanA)
+      ? cleanB
+      : cleanA;
+  }
+
   return cleanA.length <= cleanB.length ? cleanA : cleanB;
 }
 
@@ -684,13 +706,33 @@ export function consolidateDuplicateBooks(
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
 
   for (const rawItem of books) {
-    const sanitizedDate = rawItem.isManual
+    let sanitizedDate = rawItem.isManual
       ? { releaseDate: rawItem.releaseDate, datePrecision: rawItem.datePrecision }
       : sanitizeCatalogReleaseDate(
           rawItem.releaseDate,
           rawItem.datePrecision,
           currentYear
         );
+
+    // If the user finished reading this book in an earlier year (e.g. 2016 or 2024)
+    // and the catalog bumped its releaseDate to a later reissue year, clamp to finishedAt's year.
+    if (
+      !rawItem.isManual &&
+      rawItem.finishedAt &&
+      /^\d{4}-\d{2}-\d{2}$/.test(rawItem.finishedAt) &&
+      rawItem.finishedAt <= todayStr &&
+      sanitizedDate.releaseDate
+    ) {
+      const finYear = Number(rawItem.finishedAt.slice(0, 4));
+      const relYear = Number(sanitizedDate.releaseDate.slice(0, 4));
+      if (finYear >= 1900 && relYear > finYear) {
+        sanitizedDate = {
+          releaseDate: String(finYear),
+          datePrecision: 'year',
+        };
+      }
+    }
+
     const item: BookItem = {
       ...rawItem,
       ...sanitizedDate,

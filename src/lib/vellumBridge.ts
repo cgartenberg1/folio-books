@@ -5,7 +5,7 @@ import {
   pickCleanerTitle,
 } from '@/lib/bookDedupe';
 import { isCustomCoverUrl } from '@/lib/coverArt';
-import { getLocalTodayStr } from '@/lib/dates';
+import { getLocalTodayStr, parseReleaseDateInput } from '@/lib/dates';
 import { BookItem, ReadingChallenge, ReadingStatus } from '@/types/books';
 
 export interface VellumSyncBookPayload {
@@ -303,18 +303,15 @@ export function applyVellumSyncToBooks(params: {
       workingBooks[idx] = next;
       touchedIds.add(next.id);
     } else {
+      const parsedMutDate = parseReleaseDateInput(mut.publishedYear);
       const newBook: BookItem = {
         id: `vellum:${mut.vellumBookId || Date.now().toString(36)}`,
         source: 'manual',
         title: mut.title,
         authorName: mut.author || 'Unknown Author',
         coverUrl: resolvedCover,
-        releaseDate:
-          mut.publishedYear && /^\d{4}$/.test(mut.publishedYear)
-            ? mut.publishedYear
-            : undefined,
-        datePrecision:
-          mut.publishedYear && /^\d{4}$/.test(mut.publishedYear) ? 'year' : 'unknown',
+        releaseDate: parsedMutDate.releaseDate,
+        datePrecision: parsedMutDate.datePrecision,
         description: mut.description,
         isOneOff: true,
         isManual: true,
@@ -389,18 +386,15 @@ export function applyVellumSyncToBooks(params: {
         touchedIds.add(next.id);
       }
     } else if (isCompletedInVellum || vb.progress >= 0.01) {
+      const parsedVbDate = parseReleaseDateInput(vb.publishedYear);
       const created: BookItem = {
         id: `vellum:${vb.vellumBookId}`,
         source: 'manual',
         title: vb.title,
         authorName: vb.author || 'Unknown Author',
         coverUrl: resolvedCover,
-        releaseDate:
-          vb.publishedYear && /^\d{4}$/.test(vb.publishedYear)
-            ? vb.publishedYear
-            : undefined,
-        datePrecision:
-          vb.publishedYear && /^\d{4}$/.test(vb.publishedYear) ? 'year' : 'unknown',
+        releaseDate: parsedVbDate.releaseDate,
+        datePrecision: parsedVbDate.datePrecision,
         description: vb.description,
         isOneOff: true,
         isManual: true,

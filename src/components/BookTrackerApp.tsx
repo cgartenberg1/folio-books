@@ -774,10 +774,33 @@ export function BookTrackerApp() {
 
     try {
       const localToday = getLocalTodayStr();
+      const canAutoRepairBook = (b: BookItem) => {
+        if (b.id.startsWith('demo:')) return false;
+        if (
+          b.isManual &&
+          !b.id.startsWith('vellum:') &&
+          !b.id.startsWith('manual:batch:')
+        ) {
+          return false;
+        }
+        return true;
+      };
+      const candidatePriority = (b: BookItem): number => {
+        if (!b.releaseDate || b.datePrecision === 'unknown') return 0;
+        if (b.datePrecision !== 'day' || /-(01-01|12-31)$/.test(b.releaseDate)) {
+          return 1;
+        }
+        if (
+          hasEditionDecorationInTitle(b.title) ||
+          isStrictSecondaryReissueTitle(b.title)
+        ) {
+          return 2;
+        }
+        return 3;
+      };
       const candidates = stateRef.current.books
         .filter((b) => {
-          if (b.id.startsWith('demo:')) return false;
-          if (b.isManual && !b.id.startsWith('vellum:')) return false;
+          if (!canAutoRepairBook(b)) return false;
           if (!b.releaseDate || b.datePrecision !== 'day') return true;
           if (/-(01-01|12-31)$/.test(b.releaseDate)) return true;
           if (b.releaseDate >= '2026') return true;
@@ -789,8 +812,12 @@ export function BookTrackerApp() {
           }
           return false;
         })
-        .sort((a, b) => Number(Boolean(a.hidden)) - Number(Boolean(b.hidden)))
-        .slice(0, 180);
+        .sort((a, b) => {
+          const hidDiff = Number(Boolean(a.hidden)) - Number(Boolean(b.hidden));
+          if (hidDiff !== 0) return hidDiff;
+          return candidatePriority(a) - candidatePriority(b);
+        })
+        .slice(0, 500);
 
       if (candidates.length === 0) return 0;
 
@@ -833,7 +860,7 @@ export function BookTrackerApp() {
           const nextBooks = prev.books.map((b) => {
             const m = matches[b.id];
             if (!m) return b;
-            if (b.isManual && !b.id.startsWith('vellum:')) return b;
+            if (!canAutoRepairBook(b)) return b;
 
             const bestDate = pickCanonicalReleaseDate(
               b,
@@ -931,7 +958,7 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v2:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v3:${authUserId || 'local'}`;
     try {
       if (localStorage.getItem(repairKey) === '1') return;
       localStorage.setItem(repairKey, '1');
