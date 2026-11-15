@@ -132,12 +132,30 @@ export function classifyReleaseTiming(
   return 'released';
 }
 
+export function isLateYearTbaPlaceholder(
+  releaseDate?: string,
+  datePrecision?: DatePrecision,
+  todayStr: string = getLocalTodayStr()
+): boolean {
+  if (!releaseDate || datePrecision !== 'day') return false;
+  const currentYear = todayStr.slice(0, 4);
+  return (
+    releaseDate === `${currentYear}-12-31` &&
+    todayStr < `${currentYear}-12-24`
+  );
+}
+
 export function formatReleaseDate(
   releaseDate?: string,
-  datePrecision?: DatePrecision
+  datePrecision?: DatePrecision,
+  todayStr: string = getLocalTodayStr()
 ): string {
   if (!releaseDate || datePrecision === 'unknown') {
     return 'Date TBA';
+  }
+
+  if (isLateYearTbaPlaceholder(releaseDate, datePrecision, todayStr)) {
+    return `Expected ${releaseDate.slice(0, 4)}`;
   }
 
   if (datePrecision === 'year' || releaseDate.length === 4) {
@@ -165,6 +183,9 @@ export function getRelativeReleaseLabel(
   todayStr: string = getLocalTodayStr()
 ): string | null {
   if (!releaseDate || datePrecision !== 'day') {
+    return null;
+  }
+  if (isLateYearTbaPlaceholder(releaseDate, datePrecision, todayStr)) {
     return null;
   }
 
@@ -201,6 +222,21 @@ export function groupUpcomingBooksByWeek(
   const bucketMap = new Map<string, WeekBucket>();
 
   for (const book of books) {
+    if (isLateYearTbaPlaceholder(book.releaseDate, book.datePrecision, todayStr)) {
+      const yearKey = book.releaseDate!.slice(0, 4);
+      if (!bucketMap.has(`year:${yearKey}`)) {
+        bucketMap.set(`year:${yearKey}`, {
+          key: `year:${yearKey}`,
+          sortOrder: `2:${yearKey}`,
+          label: `Expected in ${yearKey} · Date TBA`,
+          isTBA: true,
+          books: [],
+        });
+      }
+      bucketMap.get(`year:${yearKey}`)!.books.push(book);
+      continue;
+    }
+
     if (book.datePrecision === 'day' && book.releaseDate) {
       const date = parseISO(book.releaseDate);
       if (!Number.isNaN(date.getTime())) {

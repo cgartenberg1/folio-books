@@ -440,8 +440,9 @@ function daysBetweenSortableDates(earlierYmd: string, laterYmd: string): number 
 }
 
 /**
- * Downgrades catalog placeholder dates (`YYYY-01-01` for >=2020 or `YYYY-12-31` for >=currentYear)
- * into year-only precision so they neither display as fake Jan 1 / Dec 31 dates nor block real dates.
+ * Downgrades catalog placeholder dates (`YYYY-01-01` for >=2020 or `YYYY-12-31` for >currentYear)
+ * into year-only precision so they neither display as fake Jan 1 / Dec 31 dates nor block real dates,
+ * while keeping `${currentYear}-12-31` > todayStr so late-year TBA books stay in Upcoming instead of jumping to Released.
  */
 export function sanitizeCatalogReleaseDate(
   releaseDate?: string,
@@ -456,7 +457,7 @@ export function sanitizeCatalogReleaseDate(
     const md = releaseDate.slice(5);
     if (
       (md === '01-01' && yearNum >= 2020) ||
-      (md === '12-31' && yearNum >= currentYear)
+      (md === '12-31' && yearNum > currentYear)
     ) {
       return {
         releaseDate: String(yearNum),
@@ -476,7 +477,7 @@ function isAlreadyReleased(
   const todayMonth = todayStr.slice(0, 7);
   if (book.datePrecision === 'day') return book.releaseDate <= todayStr;
   if (book.datePrecision === 'month') return book.releaseDate <= todayMonth;
-  if (book.datePrecision === 'year') return book.releaseDate < todayYear;
+  if (book.datePrecision === 'year') return book.releaseDate <= todayYear;
   return false;
 }
 
@@ -697,6 +698,20 @@ export function reconcileRefreshedBookDate(
     return rank(sanRef.datePrecision) >= rank(sanEx.datePrecision) ? sanRef : sanEx;
   }
 
+  // Replace `${currentYear}-12-31` TBA placeholder with any real street date
+  if (
+    sanEx.releaseDate === `${currentYear}-12-31` &&
+    sanRef.releaseDate !== `${currentYear}-12-31`
+  ) {
+    return sanRef;
+  }
+  if (
+    sanRef.releaseDate === `${currentYear}-12-31` &&
+    sanEx.releaseDate !== `${currentYear}-12-31`
+  ) {
+    return sanEx;
+  }
+
   // Fresh catalog date is EARLIER than stored date (e.g. 2025-06-03 vs 2026-06-09 paperback,
   // 2025-02-11 vs 2025-11-11 reissue, or 2017 vs 2025 Deluxe Collector's Edition)
   if (sortRef < sortEx) {
@@ -716,20 +731,38 @@ export function reconcileRefreshedBookDate(
   }
 
   // Fresh catalog date is LATER than stored date (`sortRef > sortEx`):
-  // Allow publisher release-date pushbacks (<180 days, e.g. Nov 27, 2025 -> Jan 29, 2026)
-  // while blocking 6+ month paperback/deluxe reissues from overwriting original hardcovers.
+  // Allow publisher release-date pushbacks (<180 days, e.g. Nov 27, 2025 -> Jan 27, 2026,
+  // OR up to 550 days into the future when the book is unread and verified forthcoming)
+  // while blocking paperback/deluxe reissues from overwriting original hardcovers.
   const gapForwardDays = daysBetweenSortableDates(sortEx, sortRef);
   const finishedBeforeRef = Boolean(
     existing.finishedAt &&
       /^\d{4}-\d{2}-\d{2}$/.test(existing.finishedAt) &&
       existing.finishedAt < sortRef
   );
+  const hasAnyReadEvidence =
+    existing.readingStatus === 'read' ||
+    Boolean(existing.finishedAt) ||
+    Boolean(existing.vellumBookId) ||
+    (typeof existing.vellumProgress === 'number' && existing.vellumProgress > 0);
 
   if (
     gapForwardDays > 0 &&
     gapForwardDays < 180 &&
     !finishedBeforeRef &&
     rank(sanRef.datePrecision) >= 2 &&
+    !hasEditionDecorationInTitle(refreshed.title) &&
+    !isStrictSecondaryReissueTitle(refreshed.title)
+  ) {
+    return sanRef;
+  }
+
+  if (
+    !hasAnyReadEvidence &&
+    gapForwardDays > 0 &&
+    gapForwardDays <= 550 &&
+    sanEx.releaseDate >= String(currentYear - 1) &&
+    !isAlreadyReleased({ ...refreshed, ...sanRef }, todayStr) &&
     !hasEditionDecorationInTitle(refreshed.title) &&
     !isStrictSecondaryReissueTitle(refreshed.title)
   ) {
@@ -831,8 +864,16 @@ export function mergeCanonicalBookPair(
     meta?.bUsersCount
   );
 
-  // Only keep hidden=true if BOTH copies were hidden (so hiding a duplicate paperback doesn't hide the main book!)
-  const mergedHidden = Boolean(a.hidden) && Boolean(b.hidden);
+  // Preserve hidden=true whenever an unengaged catalog book was hidden by the user,
+  // while never letting a hidden duplicate paperback hide a book marked Read or To-Do.
+  const aHasActiveStatus = a.readingStatus !== 'none';
+  const bHasActiveStatus = b.readingStatus !== 'none';
+  const mergedHidden =
+    !aHasActiveStatus && !bHasActiveStatus
+      ? Boolean(a.hidden || b.hidden)
+      : a.updatedAt >= b.updatedAt
+      ? Boolean(a.hidden && (aHasActiveStatus || !bHasActiveStatus))
+      : Boolean(b.hidden && (bHasActiveStatus || !aHasActiveStatus));
 
   const aVelTs = a.vellumLastReadAt ? Date.parse(a.vellumLastReadAt) || 0 : 0;
   const bVelTs = b.vellumLastReadAt ? Date.parse(b.vellumLastReadAt) || 0 : 0;

@@ -30,10 +30,13 @@ export async function POST(request: NextRequest) {
     const items: BatchBookEnrichInput[] = Array.isArray(body?.items)
       ? body.items.slice(0, 60)
       : [];
+    const todayStr =
+      typeof body?.todayStr === 'string' ? body.todayStr.trim() : undefined;
     const result = await enrichBooksBatch({
       items,
       hardcoverToken,
       googleApiKey,
+      todayStr,
     });
     return NextResponse.json(result);
   } catch (error) {

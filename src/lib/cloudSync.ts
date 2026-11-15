@@ -432,6 +432,75 @@ export async function pullCloudState(
   return { authors, books, challenges };
 }
 
+export async function upsertCloudBooks(
+  config: CloudConnectionConfig,
+  userId: string,
+  books: BookItem[]
+): Promise<void> {
+  if (books.length === 0) return;
+  const supabase = getSupabaseClient(config);
+  const chunkSize = 200;
+
+  for (let i = 0; i < books.length; i += chunkSize) {
+    const slice = books.slice(i, i + chunkSize);
+    const bookRows = slice.map((b) => ({
+      user_id: userId,
+      id: b.id,
+      source: b.source,
+      external_id: b.externalId ?? null,
+      title: b.title,
+      author_name: b.authorName,
+      author_id: b.authorId ?? null,
+      cover_url: b.coverUrl ?? null,
+      release_date: b.releaseDate ?? null,
+      date_precision: b.datePrecision,
+      description: b.description ?? null,
+      page_count: b.pageCount ?? null,
+      isbn: b.isbn ?? null,
+      is_one_off: b.isOneOff,
+      is_manual: Boolean(
+        b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
+      ),
+      hidden: Boolean(b.hidden),
+      reading_status: b.readingStatus,
+      added_to_todo_at: b.addedToTodoAt ?? null,
+      finished_at: b.finishedAt ?? null,
+      rating: b.rating ?? null,
+      notes: b.notes ?? null,
+      vellum_book_id: b.vellumBookId ?? null,
+      vellum_progress:
+        typeof b.vellumProgress === 'number' ? b.vellumProgress : null,
+      vellum_chapter: b.vellumChapter ?? null,
+      vellum_last_read_at: b.vellumLastReadAt ?? null,
+      vellum_format: b.vellumFormat ?? null,
+      updated_at: b.updatedAt,
+    }));
+    const { error } = await supabase
+      .from('tracked_books')
+      .upsert(bookRows, { onConflict: 'user_id,id' });
+    if (error) {
+      if (/vellum_/i.test(error.message)) {
+        const fallbackRows = bookRows.map(
+          ({
+            vellum_book_id: _vb,
+            vellum_progress: _vp,
+            vellum_chapter: _vc,
+            vellum_last_read_at: _vl,
+            vellum_format: _vf,
+            ...rest
+          }) => rest
+        );
+        const { error: fallbackErr } = await supabase
+          .from('tracked_books')
+          .upsert(fallbackRows, { onConflict: 'user_id,id' });
+        if (fallbackErr) throw new Error(fallbackErr.message);
+      } else {
+        throw new Error(error.message);
+      }
+    }
+  }
+}
+
 export async function pushFullStateToCloud(
   config: CloudConnectionConfig,
   userId: string,
@@ -459,65 +528,7 @@ export async function pushFullStateToCloud(
   }
 
   if (state.books.length > 0) {
-    const chunkSize = 200;
-    for (let i = 0; i < state.books.length; i += chunkSize) {
-      const slice = state.books.slice(i, i + chunkSize);
-      const bookRows = slice.map((b) => ({
-        user_id: userId,
-        id: b.id,
-        source: b.source,
-        external_id: b.externalId ?? null,
-        title: b.title,
-        author_name: b.authorName,
-        author_id: b.authorId ?? null,
-        cover_url: b.coverUrl ?? null,
-        release_date: b.releaseDate ?? null,
-        date_precision: b.datePrecision,
-        description: b.description ?? null,
-        page_count: b.pageCount ?? null,
-        isbn: b.isbn ?? null,
-        is_one_off: b.isOneOff,
-        is_manual: Boolean(
-          b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
-        ),
-        hidden: Boolean(b.hidden),
-        reading_status: b.readingStatus,
-        added_to_todo_at: b.addedToTodoAt ?? null,
-        finished_at: b.finishedAt ?? null,
-        rating: b.rating ?? null,
-        notes: b.notes ?? null,
-        vellum_book_id: b.vellumBookId ?? null,
-        vellum_progress:
-          typeof b.vellumProgress === 'number' ? b.vellumProgress : null,
-        vellum_chapter: b.vellumChapter ?? null,
-        vellum_last_read_at: b.vellumLastReadAt ?? null,
-        vellum_format: b.vellumFormat ?? null,
-        updated_at: b.updatedAt,
-      }));
-      const { error } = await supabase
-        .from('tracked_books')
-        .upsert(bookRows, { onConflict: 'user_id,id' });
-      if (error) {
-        if (/vellum_/i.test(error.message)) {
-          const fallbackRows = bookRows.map(
-            ({
-              vellum_book_id: _vb,
-              vellum_progress: _vp,
-              vellum_chapter: _vc,
-              vellum_last_read_at: _vl,
-              vellum_format: _vf,
-              ...rest
-            }) => rest
-          );
-          const { error: fallbackErr } = await supabase
-            .from('tracked_books')
-            .upsert(fallbackRows, { onConflict: 'user_id,id' });
-          if (fallbackErr) throw new Error(fallbackErr.message);
-        } else {
-          throw new Error(error.message);
-        }
-      }
-    }
+    await upsertCloudBooks(config, userId, state.books);
   }
 
   if (state.challenges.length > 0) {

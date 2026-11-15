@@ -78,14 +78,28 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
   );
   const bestDate = primaryHasManualDate
     ? { releaseDate: primary.releaseDate, datePrecision: primary.datePrecision }
-    : a.id === b.id
+    : a.id === b.id || bTs !== aTs
     ? reconcileRefreshedBookDate(secondary, primary, todayStr)
     : pickCanonicalReleaseDate(a, b, todayStr);
+
+  const aActive = a.readingStatus !== 'none';
+  const bActive = b.readingStatus !== 'none';
+  const explicitlyRepinned =
+    a.id === b.id &&
+    !primary.hidden &&
+    Boolean(secondary.hidden) &&
+    (primary.readingStatus !== 'none' || primary.isOneOff);
+  const mergedHidden = explicitlyRepinned
+    ? false
+    : !aActive && !bActive
+    ? Boolean(a.hidden || b.hidden)
+    : Boolean(primary.hidden && (primary.readingStatus !== 'none' || secondary.readingStatus === 'none'));
 
   return {
     ...secondary,
     ...primary,
     id: a.id, // preserve stable original ID in Folio
+    hidden: mergedHidden,
     title: isProtectedUserManualBook(primary)
       ? primary.title
       : pickCleanerTitle(primary.title, secondary.title),

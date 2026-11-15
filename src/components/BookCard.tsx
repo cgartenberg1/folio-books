@@ -9,6 +9,7 @@ import {
   classifyReleaseTiming,
   formatReleaseDate,
   getRelativeReleaseLabel,
+  isLateYearTbaPlaceholder,
 } from '@/lib/dates';
 import { canOpenVellumWebUrl } from '@/lib/vellumBridge';
 import { BookItem } from '@/types/books';
@@ -28,8 +29,12 @@ interface BookCardProps {
   onSelectAuthor?: (authorId: string) => void;
 }
 
-function DateBlock({ book }: { book: BookItem }) {
-  if (book.datePrecision === 'day' && book.releaseDate) {
+function DateBlock({ book, todayStr }: { book: BookItem; todayStr: string }) {
+  if (
+    book.datePrecision === 'day' &&
+    book.releaseDate &&
+    !isLateYearTbaPlaceholder(book.releaseDate, book.datePrecision, todayStr)
+  ) {
     const d = parseISO(book.releaseDate);
     if (!Number.isNaN(d.getTime())) {
       return (
@@ -78,7 +83,11 @@ export function BookCard({
   onSelectAuthor,
 }: BookCardProps) {
   const timing = classifyReleaseTiming(book, todayStr);
-  const formattedDate = formatReleaseDate(book.releaseDate, book.datePrecision);
+  const formattedDate = formatReleaseDate(
+    book.releaseDate,
+    book.datePrecision,
+    todayStr
+  );
   const relativeLabel = getRelativeReleaseLabel(
     book.releaseDate,
     book.datePrecision,
@@ -134,7 +143,7 @@ export function BookCard({
 
   return (
     <article className="group relative flex gap-4 border-b border-rule py-5 sm:gap-5">
-      {showDateBlock && <DateBlock book={book} />}
+      {showDateBlock && <DateBlock book={book} todayStr={todayStr} />}
 
       <BookCover
         title={book.title}

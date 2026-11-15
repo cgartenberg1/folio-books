@@ -114,7 +114,7 @@ function isPlaceholderDayDate(ymd: string, currentYear: number): boolean {
   const md = ymd.slice(5);
   return (
     (md === '01-01' && yearNum >= 2020) ||
-    (md === '12-31' && yearNum >= currentYear)
+    (md === '12-31' && yearNum > currentYear)
   );
 }
 
@@ -250,6 +250,7 @@ interface HardcoverEditionCoverNode {
   isbn_13?: string | null;
   isbn_10?: string | null;
   release_date?: string | null;
+  users_count?: number | null;
   publisher?: { name?: string | null } | null;
   image?: { url?: string | null } | null;
 }
@@ -323,6 +324,7 @@ function resolveHardcoverBookOriginalDate(
       edition_information?: string | null;
       isbn_13?: string | null;
       isbn_10?: string | null;
+      users_count?: number | null;
       publisher?: { name?: string | null } | null;
     }> | null;
   },
@@ -417,6 +419,13 @@ function resolveHardcoverBookOriginalDate(
       ? nonAudioDates
       : extractSortedDates(() => true);
 
+  const preTodayEditionUsers = cleanEditions
+    .filter((ed) => ed.release_date!.trim() <= todayStr)
+    .reduce(
+      (sum, ed) => sum + (typeof ed.users_count === 'number' ? ed.users_count : 0),
+      0
+    );
+
   const pickBestOriginalPublishedDate = (maxYmd: string): string | undefined =>
     primaryUsFirstDates.find((d) => d <= maxYmd) ||
     primaryAnyFirstDates.find((d) => d <= maxYmd) ||
@@ -494,9 +503,9 @@ function resolveHardcoverBookOriginalDate(
         }
       }
 
-      // Conversely, if EVERY English edition in Hardcover is 14-400 days AFTER `books.release_date`
+      // Conversely, if EVERY English edition in Hardcover is 14-550 days AFTER `books.release_date`
       // on a modern title (publisher street-date pushback where `books.release_date` stayed stale),
-      // use the actual earliest English edition release date.
+      // use the actual earliest English edition release date (including when pushed into the future!).
       const earliestAnyEd = validEditionDates.find((d) => d <= todayStr);
       if (
         !rawIsPlaceholder &&
@@ -515,6 +524,19 @@ function resolveHardcoverBookOriginalDate(
         }
       }
 
+      if (
+        !earliestAnyEd &&
+        preTodayEditionUsers === 0 &&
+        rawDate >= `${currentYear - 1}-01-01`
+      ) {
+        const futurePushedEd =
+          primaryUsFirstDates.find((d) => d > todayStr) ||
+          primaryAnyFirstDates.find((d) => d > todayStr);
+        if (futurePushedEd && daysBetweenYmd(rawDate, futurePushedEd) <= 550) {
+          return { releaseDate: futurePushedEd, datePrecision: 'day' };
+        }
+      }
+
       if (rawYear && rawYear >= 1900 && rawYear < rawYearFromStr) {
         return { releaseDate: String(rawYear), datePrecision: 'year' };
       }
@@ -522,7 +544,9 @@ function resolveHardcoverBookOriginalDate(
       return parseHardcoverReleaseDate(rawDate, rawYear);
     }
 
-    // `rawDate > todayStr`: check if this work was actually already published earlier
+    // `rawDate > todayStr`: check if this work was actually already published earlier.
+    // Guard against unreleased delayed books whose `books.users_count` reflects Want-to-Read shelves
+    // and whose old pre-delay edition stub has ~0 actual edition users.
     const earliestPublishedEd = [
       ...primaryUsFirstDates,
       ...primaryAnyFirstDates,
@@ -531,10 +555,12 @@ function resolveHardcoverBookOriginalDate(
 
     if (
       earliestPublishedEd &&
-      (usersCount >= 8 ||
+      (preTodayEditionUsers >= 6 ||
         isStrictSecondaryReissueTitle(node.title || '') ||
         hasEditionDecorationInTitle(node.title || '') ||
-        Boolean(rawYear && rawYear <= currentYear))
+        Boolean(rawYear && rawYear >= 1900 && rawYear <= currentYear - 2) ||
+        (usersCount >= 300 &&
+          daysBetweenYmd(earliestPublishedEd, rawDate) >= 320))
     ) {
       return { releaseDate: earliestPublishedEd, datePrecision: 'day' };
     }
@@ -542,8 +568,9 @@ function resolveHardcoverBookOriginalDate(
     if (
       rawYear &&
       rawYear >= 1900 &&
-      rawYear < currentYear &&
-      (usersCount >= 8 ||
+      rawYear <= currentYear - 2 &&
+      (preTodayEditionUsers >= 6 ||
+        usersCount >= 50 ||
         isStrictSecondaryReissueTitle(node.title || '') ||
         hasEditionDecorationInTitle(node.title || ''))
     ) {
@@ -590,7 +617,8 @@ function resolveHardcoverBookOriginalDate(
  */
 async function fetchEnglishHardcoverBooksMeta(
   ids: Array<string | number>,
-  token: string
+  token: string,
+  todayOverride?: string
 ): Promise<{
   englishIds: Set<string>;
   bestCovers: Map<string, string>;
@@ -609,7 +637,10 @@ async function fetchEnglishHardcoverBooksMeta(
     };
   }
 
-  const todayStr = getLocalTodayStr();
+  const todayStr =
+    todayOverride && /^\d{4}-\d{2}-\d{2}$/.test(todayOverride)
+      ? todayOverride
+      : getLocalTodayStr();
 
   try {
     const data = await queryHardcoverGraphQL<{
@@ -650,6 +681,7 @@ async function fetchEnglishHardcoverBooksMeta(
             isbn_13
             isbn_10
             release_date
+            users_count
             publisher {
               name
             }
@@ -976,8 +1008,9 @@ function mergeGoogleDateIntoHardcoverItem(
     }
   }
 
-  // 2. Restore original publication date if Hardcover's record was bumped to a 6+ month later paperback/deluxe reissue
-  // (requiring >= 180 days gap so 1-5 month publisher release-date delays are never dragged backward to stale pre-delay dates)
+  // 2. Restore original publication date ONLY for genuine multi-year backlist reissues (gap >= 550 days)
+  // or explicit secondary/deluxe reissue titles — never let stale pre-delay Google Books ONIX stubs
+  // (e.g. a 9-12 month delayed debut's cancelled solicitation date) override Hardcover's edition-verified street date.
   if (
     hcDate.releaseDate &&
     hcDate.releaseDate >= '2018' &&
@@ -994,7 +1027,7 @@ function mergeGoogleDateIntoHardcoverItem(
         ? `${hcDate.releaseDate}-15`
         : `${hcDate.releaseDate}-06-15`;
     const gapDays = daysBetweenYmd(gb.releaseDate, hcComparable);
-    if (gapDays >= 180 && gapDays <= 365 * 40) {
+    if (gapDays >= 550 && gapDays <= 365 * 40) {
       return { releaseDate: gb.releaseDate, datePrecision: 'day' };
     }
   }
@@ -1318,6 +1351,7 @@ const HARDCOVER_EDITION_COVER_FRAGMENT = `
     isbn_13
     isbn_10
     release_date
+    users_count
     publisher {
       name
     }
@@ -1333,10 +1367,11 @@ async function fetchHardcoverAuthorBooks(params: {
   externalId?: string;
   source: DataSource;
   token: string;
+  todayStr?: string;
 }): Promise<
   Array<{ book: BookItem; usersCount: number; fromUnscheduled: boolean }>
 > {
-  const { authorId, authorName, externalId, source, token } = params;
+  const { authorId, authorName, externalId, source, token, todayStr: todayOverride } = params;
   let numericAuthorId: number | null =
     source === 'hardcover' && externalId && /^\d+$/.test(externalId)
       ? Number(externalId)
@@ -1370,7 +1405,10 @@ async function fetchHardcoverAuthorBooks(params: {
     return [];
   }
 
-  const todayStr = getLocalTodayStr();
+  const todayStr =
+    todayOverride && /^\d{4}-\d{2}-\d{2}$/.test(todayOverride)
+      ? todayOverride
+      : getLocalTodayStr();
 
   const bibQueryWithEditionCovers = `
     query AuthorBibliography($hcAuthorId: Int!, $today: date!) {
@@ -2022,6 +2060,7 @@ export async function fetchAuthorBibliography(params: {
   hardcoverToken?: string;
   googleApiKey?: string;
   forceRefresh?: boolean;
+  todayStr?: string;
 }): Promise<{
   books: BookItem[];
   providerUsed: 'hardcover' | 'google-fallback' | 'manual';
@@ -2034,9 +2073,15 @@ export async function fetchAuthorBibliography(params: {
     hardcoverToken,
     googleApiKey,
     forceRefresh = false,
+    todayStr: todayOverride,
   } = params;
 
-  const bibCacheKey = `bib:v6:en:${source}::${externalId || ''}::${authorName
+  const todayStr =
+    todayOverride && /^\d{4}-\d{2}-\d{2}$/.test(todayOverride)
+      ? todayOverride
+      : getLocalTodayStr();
+
+  const bibCacheKey = `bib:v8:en:${todayStr}::${source}::${externalId || ''}::${authorName
     .trim()
     .toLowerCase()}::${Boolean(hardcoverToken?.trim())}`;
   if (!forceRefresh) {
@@ -2052,7 +2097,6 @@ export async function fetchAuthorBibliography(params: {
     }
   }
 
-  const todayStr = getLocalTodayStr();
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
 
   if (hardcoverToken?.trim()) {
@@ -2064,6 +2108,7 @@ export async function fetchAuthorBibliography(params: {
           externalId,
           source,
           token: hardcoverToken,
+          todayStr,
         }),
         fetchGoogleFallbackAuthorBooks({
           authorId,
@@ -2247,6 +2292,7 @@ interface HardcoverEditionBatchNode {
       edition_information?: string | null;
       isbn_13?: string | null;
       isbn_10?: string | null;
+      users_count?: number | null;
       publisher?: { name?: string | null } | null;
     }> | null;
     contributions?: Array<{
@@ -2263,10 +2309,11 @@ export async function enrichBooksBatch(params: {
   items: BatchBookEnrichInput[];
   hardcoverToken?: string;
   googleApiKey?: string;
+  todayStr?: string;
 }): Promise<{
   matches: Record<string, BatchBookEnrichMatch>;
 }> {
-  const { items, hardcoverToken, googleApiKey } = params;
+  const { items, hardcoverToken, googleApiKey, todayStr: todayOverride } = params;
   const matches: Record<string, BatchBookEnrichMatch> = {};
   const pass1UsersCount = new Map<string, number>();
 
@@ -2274,7 +2321,10 @@ export async function enrichBooksBatch(params: {
     return { matches };
   }
 
-  const todayStr = getLocalTodayStr();
+  const todayStr =
+    todayOverride && /^\d{4}-\d{2}-\d{2}$/.test(todayOverride)
+      ? todayOverride
+      : getLocalTodayStr();
 
   // Pass 1: Fast Batch ISBN Lookup on Hardcover editions (resolves up to 80 ISBNs per GraphQL query)
   if (hardcoverToken?.trim()) {
@@ -2340,6 +2390,7 @@ export async function enrichBooksBatch(params: {
                   edition_information
                   isbn_13
                   isbn_10
+                  users_count
                   publisher {
                     name
                   }
@@ -2513,7 +2564,8 @@ export async function enrichBooksBatch(params: {
         );
         const englishMeta = await fetchEnglishHardcoverBooksMeta(
           docsByAlias.flat().map((d) => d.id),
-          hardcoverToken
+          hardcoverToken,
+          todayStr
         );
         const englishIds = englishMeta?.englishIds ?? null;
         const bestCovers = englishMeta?.bestCovers;
