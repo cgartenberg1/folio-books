@@ -1,4 +1,9 @@
-import { createClient, SupabaseClient, User } from '@supabase/supabase-js';
+import {
+  createClient,
+  RealtimeChannel,
+  SupabaseClient,
+  User,
+} from '@supabase/supabase-js';
 import { mergeBookLists, mergeChallengeLists } from '@/lib/vellumBridge';
 import {
   AppSettings,
@@ -302,6 +307,7 @@ export async function updateAccountPassword(
 }
 
 export async function signOutUser(config: CloudConnectionConfig): Promise<void> {
+  resetCloudSyncFingerprints();
   const supabase = getSupabaseClient(config);
   const { error } = await supabase.auth.signOut();
   if (error) {
@@ -353,20 +359,279 @@ export async function updateUserProfile(
   };
 }
 
+// Slim column projection omits unused multi-megabyte `description` blurbs (~85% payload reduction)
+const BOOK_SYNC_COLUMNS =
+  'id,source,external_id,title,author_name,author_id,cover_url,release_date,date_precision,page_count,isbn,is_one_off,is_manual,hidden,reading_status,added_to_todo_at,finished_at,rating,notes,vellum_book_id,vellum_progress,vellum_chapter,vellum_last_read_at,vellum_format,updated_at';
+
+const BOOK_SYNC_COLUMNS_NO_VELLUM =
+  'id,source,external_id,title,author_name,author_id,cover_url,release_date,date_precision,page_count,isbn,is_one_off,is_manual,hidden,reading_status,added_to_todo_at,finished_at,rating,notes,updated_at';
+
+let serverSupportsVellumCols = true;
+
+interface UserCloudSyncCache {
+  books: Map<string, string>;
+  authors: Map<string, string>;
+  challenges: Map<string, string>;
+  lastSyncAnchorMs: number;
+}
+
+const userSyncCaches = new Map<string, UserCloudSyncCache>();
+
+function getOrCreateUserSyncCache(userId: string): UserCloudSyncCache {
+  let cache = userSyncCaches.get(userId);
+  if (!cache) {
+    cache = {
+      books: new Map(),
+      authors: new Map(),
+      challenges: new Map(),
+      lastSyncAnchorMs: 0,
+    };
+    userSyncCaches.set(userId, cache);
+  }
+  return cache;
+}
+
+export function resetCloudSyncFingerprints(userId?: string): void {
+  if (userId) {
+    userSyncCaches.delete(userId);
+  } else {
+    userSyncCaches.clear();
+  }
+}
+
+function fingerprintBook(b: BookItem): string {
+  const isManualCol = Boolean(
+    b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
+  );
+  return [
+    b.source,
+    b.externalId ?? '',
+    b.title,
+    b.authorName,
+    b.authorId ?? '',
+    b.coverUrl ?? '',
+    b.releaseDate ?? '',
+    b.datePrecision,
+    b.pageCount ?? '',
+    b.isbn ?? '',
+    b.isOneOff ? 1 : 0,
+    isManualCol ? 1 : 0,
+    b.hidden ? 1 : 0,
+    b.readingStatus,
+    b.addedToTodoAt ?? '',
+    b.finishedAt ?? '',
+    b.rating ?? '',
+    b.notes ?? '',
+    b.vellumBookId ?? '',
+    typeof b.vellumProgress === 'number' ? b.vellumProgress : '',
+    b.vellumChapter ?? '',
+    b.vellumLastReadAt ?? '',
+    b.vellumFormat ?? '',
+    b.updatedAt,
+  ].join('\x1f');
+}
+
+function fingerprintAuthor(a: FollowedAuthor): string {
+  return [
+    a.source,
+    a.externalId ?? '',
+    a.name,
+    a.imageUrl ?? '',
+    a.bio ?? '',
+    a.followedAt,
+    a.lastSyncedAt ?? '',
+    a.updatedAt,
+  ].join('\x1f');
+}
+
+function fingerprintChallenge(c: ReadingChallenge): string {
+  return [c.year, c.goalCount, c.title, c.createdAt, c.updatedAt].join('\x1f');
+}
+
+export function hasDirtyCloudState(
+  userId: string,
+  state: TrackerState
+): boolean {
+  const cache = userSyncCaches.get(userId);
+  if (!cache) {
+    return (
+      state.books.length > 0 ||
+      state.authors.length > 0 ||
+      state.challenges.length > 0
+    );
+  }
+  for (const a of state.authors) {
+    if (cache.authors.get(a.id) !== fingerprintAuthor(a)) return true;
+  }
+  for (const b of state.books) {
+    if (cache.books.get(b.id) !== fingerprintBook(b)) return true;
+  }
+  for (const c of state.challenges) {
+    if (cache.challenges.get(c.id) !== fingerprintChallenge(c)) return true;
+  }
+  return false;
+}
+
+const CLIENT_INSTANCE_ID = `folio-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+
+export interface CloudSyncBroadcastPayload {
+  senderId?: string;
+  ts?: number;
+  changedBookIds?: string[];
+  changedAuthorIds?: string[];
+  changedChallengeIds?: string[];
+  deletedBookIds?: string[];
+  deletedAuthorIds?: string[];
+  deletedChallengeIds?: string[];
+}
+
+interface ManagedBroadcastEntry {
+  userId: string;
+  clientKey: string;
+  channel: RealtimeChannel;
+  listeners: Set<(payload: CloudSyncBroadcastPayload) => void>;
+}
+
+let activeBroadcastEntry: ManagedBroadcastEntry | null = null;
+
+function ensureBroadcastEntry(
+  config: CloudConnectionConfig,
+  userId: string
+): ManagedBroadcastEntry {
+  const supabase = getSupabaseClient(config);
+  const clientKey = `${config.supabaseUrl}::${config.supabaseAnonKey}`;
+
+  if (
+    activeBroadcastEntry &&
+    activeBroadcastEntry.userId === userId &&
+    activeBroadcastEntry.clientKey === clientKey
+  ) {
+    return activeBroadcastEntry;
+  }
+
+  if (activeBroadcastEntry) {
+    try {
+      supabase.removeChannel(activeBroadcastEntry.channel).catch(() => {});
+    } catch {}
+    activeBroadcastEntry = null;
+  }
+
+  const listeners = new Set<(payload: CloudSyncBroadcastPayload) => void>();
+  const channel = supabase.channel(`folio-sync:${userId}`, {
+    config: {
+      broadcast: { self: false },
+    },
+  });
+
+  channel
+    .on('broadcast', { event: 'ledger-mutated' }, (msg) => {
+      const payload = (msg?.payload || {}) as CloudSyncBroadcastPayload;
+      if (payload.senderId && payload.senderId === CLIENT_INSTANCE_ID) return;
+      for (const listener of Array.from(listeners)) {
+        try {
+          listener(payload);
+        } catch {}
+      }
+    })
+    .subscribe();
+
+  activeBroadcastEntry = { userId, clientKey, channel, listeners };
+  return activeBroadcastEntry;
+}
+
+export function subscribeToCloudSyncBroadcast(
+  config: CloudConnectionConfig,
+  userId: string,
+  onMutation: (payload: CloudSyncBroadcastPayload) => void
+): () => void {
+  const entry = ensureBroadcastEntry(config, userId);
+  entry.listeners.add(onMutation);
+
+  return () => {
+    entry.listeners.delete(onMutation);
+    if (entry.listeners.size === 0 && activeBroadcastEntry === entry) {
+      const supabase = getSupabaseClient(config);
+      activeBroadcastEntry = null;
+      try {
+        supabase.removeChannel(entry.channel).catch(() => {});
+      } catch {}
+    }
+  };
+}
+
+function broadcastCloudMutation(
+  config: CloudConnectionConfig,
+  userId: string,
+  payload: Omit<CloudSyncBroadcastPayload, 'senderId' | 'ts'>
+): void {
+  try {
+    const entry = ensureBroadcastEntry(config, userId);
+    entry.channel
+      .send({
+        type: 'broadcast',
+        event: 'ledger-mutated',
+        payload: {
+          ...payload,
+          senderId: CLIENT_INSTANCE_ID,
+          ts: Date.now(),
+        },
+      })
+      .catch(() => {});
+  } catch {}
+}
+
 async function fetchAllPaginatedRows<TRow>(
   buildPageQuery: (
     from: number,
-    to: number
-  ) => PromiseLike<{ data: TRow[] | null; error: { message: string } | null }>
+    to: number,
+    withExactCount?: boolean
+  ) => PromiseLike<{
+    data: TRow[] | null;
+    count?: number | null;
+    error: { message: string } | null;
+  }>
 ): Promise<TRow[]> {
   const pageSize = 1000;
   const maxPages = 30;
-  const all: TRow[] = [];
 
-  for (let page = 0; page < maxPages; page++) {
+  const firstRes = await buildPageQuery(0, pageSize - 1, true);
+  if (firstRes.error) throw new Error(firstRes.error.message);
+  const firstRows = firstRes.data || [];
+  if (firstRows.length < pageSize) {
+    return firstRows;
+  }
+
+  const all: TRow[] = [...firstRows];
+
+  if (typeof firstRes.count === 'number' && firstRes.count > pageSize) {
+    const totalPages = Math.min(maxPages, Math.ceil(firstRes.count / pageSize));
+    const remainingPages: number[] = [];
+    for (let page = 1; page < totalPages; page++) {
+      remainingPages.push(page);
+    }
+    const maxConcurrency = 4;
+    for (let i = 0; i < remainingPages.length; i += maxConcurrency) {
+      const batch = remainingPages.slice(i, i + maxConcurrency);
+      const batchResults = await Promise.all(
+        batch.map(async (page) => {
+          const from = page * pageSize;
+          const to = from + pageSize - 1;
+          const { data, error } = await buildPageQuery(from, to, false);
+          if (error) throw new Error(error.message);
+          return data || [];
+        })
+      );
+      for (const rows of batchResults) {
+        all.push(...rows);
+      }
+    }
+    return all;
+  }
+
+  for (let page = 1; page < maxPages; page++) {
     const from = page * pageSize;
     const to = from + pageSize - 1;
-    const { data, error } = await buildPageQuery(from, to);
+    const { data, error } = await buildPageQuery(from, to, false);
     if (error) throw new Error(error.message);
     const rows = data || [];
     all.push(...rows);
@@ -376,37 +641,41 @@ async function fetchAllPaginatedRows<TRow>(
   return all;
 }
 
-export async function pullCloudState(
-  config: CloudConnectionConfig,
-  userId: string
-): Promise<TrackerState> {
-  const supabase = getSupabaseClient(config);
-
-  // Paginate past PostgREST's 1,000-row default cap in deterministic primary-key order
-  // so large libraries (>1,000 tracked_books) sync 100% identically across every device.
-  const [authorRows, bookRows, challengesRes] = await Promise.all([
-    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
-      supabase
-        .from('followed_authors')
-        .select('*')
-        .eq('user_id', userId)
-        .order('id', { ascending: true })
-        .range(from, to)
-    ),
-    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
-      supabase
+async function fetchTrackedBookRowsWithFallback(
+  supabase: SupabaseClient,
+  userId: string,
+  options?: { updatedSinceIso?: string }
+): Promise<Record<string, any>[]> {
+  const runWithCols = (cols: string) =>
+    fetchAllPaginatedRows<Record<string, any>>((from, to, withExactCount) => {
+      let query = supabase
         .from('tracked_books')
-        .select('*')
-        .eq('user_id', userId)
-        .order('id', { ascending: true })
-        .range(from, to)
-    ),
-    supabase.from('reading_challenges').select('*').eq('user_id', userId),
-  ]);
+        .select(cols, withExactCount ? { count: 'exact' } : undefined)
+        .eq('user_id', userId);
+      if (options?.updatedSinceIso) {
+        query = query.gte('updated_at', options.updatedSinceIso);
+      }
+      return query.order('id', { ascending: true }).range(from, to);
+    });
 
-  if (challengesRes.error) throw new Error(challengesRes.error.message);
+  const preferredCols = serverSupportsVellumCols
+    ? BOOK_SYNC_COLUMNS
+    : BOOK_SYNC_COLUMNS_NO_VELLUM;
 
-  const authors: FollowedAuthor[] = authorRows.map((row) => ({
+  try {
+    return await runWithCols(preferredCols);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (serverSupportsVellumCols && /vellum_/i.test(msg)) {
+      serverSupportsVellumCols = false;
+      return await runWithCols(BOOK_SYNC_COLUMNS_NO_VELLUM);
+    }
+    throw err;
+  }
+}
+
+function mapAuthorRow(row: Record<string, any>): FollowedAuthor {
+  return {
     id: row.id,
     source: row.source as DataSource,
     externalId: row.external_id ?? undefined,
@@ -416,9 +685,11 @@ export async function pullCloudState(
     followedAt: row.followed_at,
     lastSyncedAt: row.last_synced_at ?? undefined,
     updatedAt: row.updated_at,
-  }));
+  };
+}
 
-  const books: BookItem[] = bookRows.map((row) => ({
+function mapBookRow(row: Record<string, any>): BookItem {
+  return {
     id: row.id,
     source: row.source as DataSource,
     externalId: row.external_id ?? undefined,
@@ -428,7 +699,6 @@ export async function pullCloudState(
     coverUrl: row.cover_url ?? undefined,
     releaseDate: row.release_date ?? undefined,
     datePrecision: (row.date_precision || 'unknown') as DatePrecision,
-    description: row.description ?? undefined,
     pageCount: row.page_count ?? undefined,
     isbn: row.isbn ?? undefined,
     isOneOff: Boolean(row.is_one_off),
@@ -452,88 +722,334 @@ export async function pullCloudState(
     vellumLastReadAt: row.vellum_last_read_at ?? undefined,
     vellumFormat: row.vellum_format ?? undefined,
     updatedAt: row.updated_at,
-  }));
+  };
+}
 
-  const challenges: ReadingChallenge[] = (challengesRes.data || []).map(
-    (row) => ({
-      id: row.id,
-      year: row.year,
-      goalCount: row.goal_count,
-      title: row.title,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    })
-  );
+function mapChallengeRow(row: Record<string, any>): ReadingChallenge {
+  return {
+    id: row.id,
+    year: row.year,
+    goalCount: row.goal_count,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function pullCloudState(
+  config: CloudConnectionConfig,
+  userId: string
+): Promise<TrackerState> {
+  const supabase = getSupabaseClient(config);
+  const pullStartedMs = Date.now();
+
+  // Paginate past PostgREST's 1,000-row default cap in parallel across pages
+  // while omitting unused multi-MB book descriptions.
+  const [authorRows, bookRows, challengesRes] = await Promise.all([
+    fetchAllPaginatedRows<Record<string, any>>((from, to, withExactCount) =>
+      supabase
+        .from('followed_authors')
+        .select('*', withExactCount ? { count: 'exact' } : undefined)
+        .eq('user_id', userId)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchTrackedBookRowsWithFallback(supabase, userId),
+    supabase.from('reading_challenges').select('*').eq('user_id', userId),
+  ]);
+
+  if (challengesRes.error) throw new Error(challengesRes.error.message);
+
+  const authors = authorRows.map(mapAuthorRow);
+  const books = bookRows.map(mapBookRow);
+  const challenges = (challengesRes.data || []).map(mapChallengeRow);
+
+  const cache = getOrCreateUserSyncCache(userId);
+  cache.authors.clear();
+  for (const a of authors) cache.authors.set(a.id, fingerprintAuthor(a));
+  cache.books.clear();
+  for (const b of books) cache.books.set(b.id, fingerprintBook(b));
+  cache.challenges.clear();
+  for (const c of challenges) {
+    cache.challenges.set(c.id, fingerprintChallenge(c));
+  }
+  cache.lastSyncAnchorMs = pullStartedMs;
 
   return { authors, books, challenges };
+}
+
+export interface CloudDeltaResult {
+  authors: FollowedAuthor[];
+  books: BookItem[];
+  challenges: ReadingChallenge[];
+  remoteAuthorIds?: Set<string>;
+  remoteBookIds?: Set<string>;
+  remoteChallengeIds?: Set<string>;
+}
+
+export async function pullCloudDelta(
+  config: CloudConnectionConfig,
+  userId: string,
+  options?: {
+    explicitBookIds?: string[];
+    explicitAuthorIds?: string[];
+    includeIdManifest?: boolean;
+  }
+): Promise<CloudDeltaResult> {
+  const supabase = getSupabaseClient(config);
+  const cache = getOrCreateUserSyncCache(userId);
+  const pullStartedMs = Date.now();
+  const baseAnchorMs =
+    cache.lastSyncAnchorMs > 0
+      ? cache.lastSyncAnchorMs
+      : pullStartedMs - 5 * 60 * 1000;
+  // 2-minute clock-skew buffer guarantees edits from slightly behind device clocks are never missed
+  const bufferedSinceIso = new Date(
+    Math.max(0, baseAnchorMs - 120_000)
+  ).toISOString();
+
+  const explicitBookIds = Array.from(
+    new Set((options?.explicitBookIds || []).filter(Boolean))
+  ).slice(0, 60);
+  const explicitAuthorIds = Array.from(
+    new Set((options?.explicitAuthorIds || []).filter(Boolean))
+  ).slice(0, 60);
+
+  const fetchExplicitBooksPromise =
+    explicitBookIds.length > 0
+      ? (async () => {
+          const cols = serverSupportsVellumCols
+            ? BOOK_SYNC_COLUMNS
+            : BOOK_SYNC_COLUMNS_NO_VELLUM;
+          const res = await supabase
+            .from('tracked_books')
+            .select(cols)
+            .eq('user_id', userId)
+            .in('id', explicitBookIds);
+          if (res.error) {
+            if (serverSupportsVellumCols && /vellum_/i.test(res.error.message)) {
+              serverSupportsVellumCols = false;
+              const fallback = await supabase
+                .from('tracked_books')
+                .select(BOOK_SYNC_COLUMNS_NO_VELLUM)
+                .eq('user_id', userId)
+                .in('id', explicitBookIds);
+              if (fallback.error) throw new Error(fallback.error.message);
+              return (fallback.data || []) as Record<string, any>[];
+            }
+            throw new Error(res.error.message);
+          }
+          return (res.data || []) as Record<string, any>[];
+        })()
+      : Promise.resolve([] as Record<string, any>[]);
+
+  const fetchExplicitAuthorsPromise =
+    explicitAuthorIds.length > 0
+      ? supabase
+          .from('followed_authors')
+          .select('*')
+          .eq('user_id', userId)
+          .in('id', explicitAuthorIds)
+          .then((res) => {
+            if (res.error) throw new Error(res.error.message);
+            return (res.data || []) as Record<string, any>[];
+          })
+      : Promise.resolve([] as Record<string, any>[]);
+
+  const manifestPromise = options?.includeIdManifest
+    ? Promise.all([
+        fetchAllPaginatedRows<{ id: string }>((from, to, withExactCount) =>
+          supabase
+            .from('followed_authors')
+            .select('id', withExactCount ? { count: 'exact' } : undefined)
+            .eq('user_id', userId)
+            .order('id', { ascending: true })
+            .range(from, to)
+        ),
+        fetchAllPaginatedRows<{ id: string }>((from, to, withExactCount) =>
+          supabase
+            .from('tracked_books')
+            .select('id', withExactCount ? { count: 'exact' } : undefined)
+            .eq('user_id', userId)
+            .order('id', { ascending: true })
+            .range(from, to)
+        ),
+        supabase.from('reading_challenges').select('id').eq('user_id', userId),
+      ])
+    : Promise.resolve(null);
+
+  const [
+    sinceAuthorRows,
+    explicitAuthorRows,
+    sinceBookRows,
+    explicitBookRows,
+    challengesRes,
+    manifestRes,
+  ] = await Promise.all([
+    fetchAllPaginatedRows<Record<string, any>>((from, to, withExactCount) =>
+      supabase
+        .from('followed_authors')
+        .select('*', withExactCount ? { count: 'exact' } : undefined)
+        .eq('user_id', userId)
+        .gte('updated_at', bufferedSinceIso)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchExplicitAuthorsPromise,
+    fetchTrackedBookRowsWithFallback(supabase, userId, {
+      updatedSinceIso: bufferedSinceIso,
+    }),
+    fetchExplicitBooksPromise,
+    supabase
+      .from('reading_challenges')
+      .select('*')
+      .eq('user_id', userId)
+      .gte('updated_at', bufferedSinceIso),
+    manifestPromise,
+  ]);
+
+  if (challengesRes.error) throw new Error(challengesRes.error.message);
+
+  const authorRowMap = new Map<string, Record<string, any>>();
+  for (const r of sinceAuthorRows) authorRowMap.set(r.id, r);
+  for (const r of explicitAuthorRows) authorRowMap.set(r.id, r);
+
+  const bookRowMap = new Map<string, Record<string, any>>();
+  for (const r of sinceBookRows) bookRowMap.set(r.id, r);
+  for (const r of explicitBookRows) bookRowMap.set(r.id, r);
+
+  const authors = Array.from(authorRowMap.values()).map(mapAuthorRow);
+  const books = Array.from(bookRowMap.values()).map(mapBookRow);
+  const challenges = (challengesRes.data || []).map(mapChallengeRow);
+
+  for (const a of authors) cache.authors.set(a.id, fingerprintAuthor(a));
+  for (const b of books) cache.books.set(b.id, fingerprintBook(b));
+  for (const c of challenges) {
+    cache.challenges.set(c.id, fingerprintChallenge(c));
+  }
+  cache.lastSyncAnchorMs = pullStartedMs;
+
+  let remoteAuthorIds: Set<string> | undefined;
+  let remoteBookIds: Set<string> | undefined;
+  let remoteChallengeIds: Set<string> | undefined;
+
+  if (manifestRes) {
+    const [authorIdsRows, bookIdsRows, challengeIdsRes] = manifestRes;
+    remoteAuthorIds = new Set(authorIdsRows.map((r) => r.id));
+    remoteBookIds = new Set(bookIdsRows.map((r) => r.id));
+    if (!challengeIdsRes.error && challengeIdsRes.data) {
+      remoteChallengeIds = new Set(challengeIdsRes.data.map((r) => r.id));
+    }
+    for (const id of Array.from(cache.authors.keys())) {
+      if (!remoteAuthorIds.has(id)) cache.authors.delete(id);
+    }
+    for (const id of Array.from(cache.books.keys())) {
+      if (!remoteBookIds.has(id)) cache.books.delete(id);
+    }
+    if (remoteChallengeIds) {
+      for (const id of Array.from(cache.challenges.keys())) {
+        if (!remoteChallengeIds.has(id)) cache.challenges.delete(id);
+      }
+    }
+  }
+
+  return {
+    authors,
+    books,
+    challenges,
+    remoteAuthorIds,
+    remoteBookIds,
+    remoteChallengeIds,
+  };
 }
 
 export async function upsertCloudBooks(
   config: CloudConnectionConfig,
   userId: string,
-  books: BookItem[]
+  books: BookItem[],
+  options?: { skipBroadcast?: boolean }
 ): Promise<void> {
   if (books.length === 0) return;
   const supabase = getSupabaseClient(config);
-  const chunkSize = 200;
+  const cache = getOrCreateUserSyncCache(userId);
+  const chunkSize = 250;
+  const maxConcurrency = 3;
 
+  const slices: BookItem[][] = [];
   for (let i = 0; i < books.length; i += chunkSize) {
-    const slice = books.slice(i, i + chunkSize);
-    const bookRows = slice.map((b) => ({
-      user_id: userId,
-      id: b.id,
-      source: b.source,
-      external_id: b.externalId ?? null,
-      title: b.title,
-      author_name: b.authorName,
-      author_id: b.authorId ?? null,
-      cover_url: b.coverUrl ?? null,
-      release_date: b.releaseDate ?? null,
-      date_precision: b.datePrecision,
-      description: b.description ?? null,
-      page_count: b.pageCount ?? null,
-      isbn: b.isbn ?? null,
-      is_one_off: b.isOneOff,
-      is_manual: Boolean(
-        b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
-      ),
-      hidden: Boolean(b.hidden),
-      reading_status: b.readingStatus,
-      added_to_todo_at: b.addedToTodoAt ?? null,
-      finished_at: b.finishedAt ?? null,
-      rating: b.rating ?? null,
-      notes: b.notes ?? null,
-      vellum_book_id: b.vellumBookId ?? null,
-      vellum_progress:
-        typeof b.vellumProgress === 'number' ? b.vellumProgress : null,
-      vellum_chapter: b.vellumChapter ?? null,
-      vellum_last_read_at: b.vellumLastReadAt ?? null,
-      vellum_format: b.vellumFormat ?? null,
-      updated_at: b.updatedAt,
-    }));
+    slices.push(books.slice(i, i + chunkSize));
+  }
+
+  const upsertSlice = async (slice: BookItem[]) => {
+    const buildRows = (includeVellum: boolean) =>
+      slice.map((b) => {
+        const base: Record<string, unknown> = {
+          user_id: userId,
+          id: b.id,
+          source: b.source,
+          external_id: b.externalId ?? null,
+          title: b.title,
+          author_name: b.authorName,
+          author_id: b.authorId ?? null,
+          cover_url: b.coverUrl ?? null,
+          release_date: b.releaseDate ?? null,
+          date_precision: b.datePrecision,
+          page_count: b.pageCount ?? null,
+          isbn: b.isbn ?? null,
+          is_one_off: b.isOneOff,
+          is_manual: Boolean(
+            b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
+          ),
+          hidden: Boolean(b.hidden),
+          reading_status: b.readingStatus,
+          added_to_todo_at: b.addedToTodoAt ?? null,
+          finished_at: b.finishedAt ?? null,
+          rating: b.rating ?? null,
+          notes: b.notes ?? null,
+          updated_at: b.updatedAt,
+        };
+        if (includeVellum) {
+          base.vellum_book_id = b.vellumBookId ?? null;
+          base.vellum_progress =
+            typeof b.vellumProgress === 'number' ? b.vellumProgress : null;
+          base.vellum_chapter = b.vellumChapter ?? null;
+          base.vellum_last_read_at = b.vellumLastReadAt ?? null;
+          base.vellum_format = b.vellumFormat ?? null;
+        }
+        return base;
+      });
+
     const { error } = await supabase
       .from('tracked_books')
-      .upsert(bookRows, { onConflict: 'user_id,id' });
+      .upsert(buildRows(serverSupportsVellumCols), {
+        onConflict: 'user_id,id',
+      });
     if (error) {
-      if (/vellum_/i.test(error.message)) {
-        const fallbackRows = bookRows.map(
-          ({
-            vellum_book_id: _vb,
-            vellum_progress: _vp,
-            vellum_chapter: _vc,
-            vellum_last_read_at: _vl,
-            vellum_format: _vf,
-            ...rest
-          }) => rest
-        );
+      if (serverSupportsVellumCols && /vellum_/i.test(error.message)) {
+        serverSupportsVellumCols = false;
         const { error: fallbackErr } = await supabase
           .from('tracked_books')
-          .upsert(fallbackRows, { onConflict: 'user_id,id' });
+          .upsert(buildRows(false), { onConflict: 'user_id,id' });
         if (fallbackErr) throw new Error(fallbackErr.message);
       } else {
         throw new Error(error.message);
       }
     }
+
+    for (const b of slice) {
+      cache.books.set(b.id, fingerprintBook(b));
+    }
+  };
+
+  for (let i = 0; i < slices.length; i += maxConcurrency) {
+    const batch = slices.slice(i, i + maxConcurrency);
+    await Promise.all(batch.map(upsertSlice));
+  }
+
+  if (!options?.skipBroadcast) {
+    broadcastCloudMutation(config, userId, {
+      changedBookIds: books.length <= 40 ? books.map((b) => b.id) : undefined,
+    });
   }
 }
 
@@ -543,9 +1059,29 @@ export async function pushFullStateToCloud(
   state: TrackerState
 ): Promise<void> {
   const supabase = getSupabaseClient(config);
+  const cache = getOrCreateUserSyncCache(userId);
 
-  if (state.authors.length > 0) {
-    const authorRows = state.authors.map((a) => ({
+  const dirtyAuthors = state.authors.filter(
+    (a) => cache.authors.get(a.id) !== fingerprintAuthor(a)
+  );
+  const dirtyBooks = state.books.filter(
+    (b) => cache.books.get(b.id) !== fingerprintBook(b)
+  );
+  const dirtyChallenges = state.challenges.filter(
+    (c) => cache.challenges.get(c.id) !== fingerprintChallenge(c)
+  );
+
+  if (
+    dirtyAuthors.length === 0 &&
+    dirtyBooks.length === 0 &&
+    dirtyChallenges.length === 0
+  ) {
+    return;
+  }
+
+  // Ensure followed_authors exist before books referencing author_id if any dirty authors exist
+  if (dirtyAuthors.length > 0) {
+    const authorRows = dirtyAuthors.map((a) => ({
       user_id: userId,
       id: a.id,
       source: a.source,
@@ -561,27 +1097,51 @@ export async function pushFullStateToCloud(
       .from('followed_authors')
       .upsert(authorRows, { onConflict: 'user_id,id' });
     if (error) throw new Error(error.message);
+    for (const a of dirtyAuthors) {
+      cache.authors.set(a.id, fingerprintAuthor(a));
+    }
   }
 
-  if (state.books.length > 0) {
-    await upsertCloudBooks(config, userId, state.books);
-  }
+  await Promise.all([
+    dirtyBooks.length > 0
+      ? upsertCloudBooks(config, userId, dirtyBooks, { skipBroadcast: true })
+      : Promise.resolve(),
+    dirtyChallenges.length > 0
+      ? (async () => {
+          const challengeRows = dirtyChallenges.map((c) => ({
+            user_id: userId,
+            id: c.id,
+            year: c.year,
+            goal_count: c.goalCount,
+            title: c.title,
+            created_at: c.createdAt,
+            updated_at: c.updatedAt,
+          }));
+          const { error } = await supabase
+            .from('reading_challenges')
+            .upsert(challengeRows, { onConflict: 'user_id,id' });
+          if (error) throw new Error(error.message);
+          for (const c of dirtyChallenges) {
+            cache.challenges.set(c.id, fingerprintChallenge(c));
+          }
+        })()
+      : Promise.resolve(),
+  ]);
 
-  if (state.challenges.length > 0) {
-    const challengeRows = state.challenges.map((c) => ({
-      user_id: userId,
-      id: c.id,
-      year: c.year,
-      goal_count: c.goalCount,
-      title: c.title,
-      created_at: c.createdAt,
-      updated_at: c.updatedAt,
-    }));
-    const { error } = await supabase
-      .from('reading_challenges')
-      .upsert(challengeRows, { onConflict: 'user_id,id' });
-    if (error) throw new Error(error.message);
-  }
+  broadcastCloudMutation(config, userId, {
+    changedAuthorIds:
+      dirtyAuthors.length > 0 && dirtyAuthors.length <= 40
+        ? dirtyAuthors.map((a) => a.id)
+        : undefined,
+    changedBookIds:
+      dirtyBooks.length > 0 && dirtyBooks.length <= 40
+        ? dirtyBooks.map((b) => b.id)
+        : undefined,
+    changedChallengeIds:
+      dirtyChallenges.length > 0
+        ? dirtyChallenges.map((c) => c.id)
+        : undefined,
+  });
 }
 
 export async function deleteCloudRecords(
@@ -593,17 +1153,45 @@ export async function deleteCloudRecords(
   const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
   if (uniqueIds.length === 0) return;
   const supabase = getSupabaseClient(config);
+  const cache = getOrCreateUserSyncCache(userId);
   const chunkSize = 75;
+  const maxConcurrency = 3;
 
+  const slices: string[][] = [];
   for (let i = 0; i < uniqueIds.length; i += chunkSize) {
-    const slice = uniqueIds.slice(i, i + chunkSize);
-    const { error } = await supabase
-      .from(table)
-      .delete()
-      .eq('user_id', userId)
-      .in('id', slice);
-    if (error) throw new Error(error.message);
+    slices.push(uniqueIds.slice(i, i + chunkSize));
   }
+
+  for (let i = 0; i < slices.length; i += maxConcurrency) {
+    const batch = slices.slice(i, i + maxConcurrency);
+    await Promise.all(
+      batch.map(async (slice) => {
+        const { error } = await supabase
+          .from(table)
+          .delete()
+          .eq('user_id', userId)
+          .in('id', slice);
+        if (error) throw new Error(error.message);
+      })
+    );
+  }
+
+  const cacheMap =
+    table === 'followed_authors'
+      ? cache.authors
+      : table === 'tracked_books'
+        ? cache.books
+        : cache.challenges;
+  for (const id of uniqueIds) {
+    cacheMap.delete(id);
+  }
+
+  const cappedIds = uniqueIds.length <= 80 ? uniqueIds : undefined;
+  broadcastCloudMutation(config, userId, {
+    deletedAuthorIds: table === 'followed_authors' ? cappedIds : undefined,
+    deletedBookIds: table === 'tracked_books' ? cappedIds : undefined,
+    deletedChallengeIds: table === 'reading_challenges' ? cappedIds : undefined,
+  });
 }
 
 export function mergeLocalAndCloudState(
@@ -835,10 +1423,13 @@ export async function fetchGroupFeedAndStandings(
       .select('*')
       .in('user_id', memberIds)
       .eq('year', year),
-    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
+    fetchAllPaginatedRows<Record<string, any>>((from, to, withExactCount) =>
       supabase
         .from('tracked_books')
-        .select('*')
+        .select(
+          'id,user_id,source,external_id,title,author_name,cover_url,release_date,date_precision,finished_at,rating,notes,updated_at',
+          withExactCount ? { count: 'exact' } : undefined
+        )
         .in('user_id', memberIds)
         .eq('reading_status', 'read')
         .eq('hidden', false)

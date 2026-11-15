@@ -45,15 +45,20 @@ import { isCustomCoverUrl, pickPreferredCoverUrl } from '@/lib/coverArt';
 import { buildDemoLibrary } from '@/lib/demoLibrary';
 import { format, parseISO } from 'date-fns';
 import {
+  type CloudSyncBroadcastPayload,
   deleteCloudRecords,
   getCurrentSessionAndProfile,
+  hasDirtyCloudState,
   mergeLocalAndCloudState,
+  pullCloudDelta,
   pullCloudState,
   pushFullStateToCloud,
+  resetCloudSyncFingerprints,
   resolveCloudConfig,
   sendMagicLink,
   signOutUser,
   subscribeToAuthChanges,
+  subscribeToCloudSyncBroadcast,
   updateUserProfile,
   upsertCloudBooks,
 } from '@/lib/cloudSync';
@@ -523,17 +528,23 @@ export function BookTrackerApp() {
       setCloudSyncStatus('syncing');
       setCloudSyncError(undefined);
       try {
-        const remote = await pullCloudState(cfg, targetUserId);
         let prevOwnerId: string | null = null;
         try {
           prevOwnerId = localStorage.getItem(LAST_AUTH_USER_KEY);
         } catch {}
 
-        const localToday = getLocalTodayStr();
-        setTodayStr((prev) => (prev === localToday ? prev : localToday));
         const shouldReplaceLocal =
           Boolean(options?.replaceLocalCache) ||
           Boolean(prevOwnerId && prevOwnerId !== targetUserId);
+
+        if (shouldReplaceLocal) {
+          resetCloudSyncFingerprints(targetUserId);
+        }
+
+        const remote = await pullCloudState(cfg, targetUserId);
+
+        const localToday = getLocalTodayStr();
+        setTodayStr((prev) => (prev === localToday ? prev : localToday));
 
         let settledBooksCount = 0;
 
@@ -563,11 +574,11 @@ export function BookTrackerApp() {
               'tracked_books',
               allCleanupIds
             ).catch(() => {});
-            await pushFullStateToCloud(cfg, targetUserId, {
-              ...remote,
-              books: syncedRemoteBooks,
-            });
           }
+          await pushFullStateToCloud(cfg, targetUserId, {
+            ...remote,
+            books: syncedRemoteBooks,
+          });
         } else {
           // Same user or first-time upgrade: drop unengaged local ghosts already pruned in cloud
           const rawMerged = mergeLocalAndCloudState(stateRef.current, remote, {
@@ -677,7 +688,7 @@ export function BookTrackerApp() {
     }
   }, [mounted, demoMode, cloudConfig, authUserId, settings, triggerCloudPullAndPush]);
 
-  // Debounced background push on state edits when signed in
+  // Debounced diff-only background push on state edits when signed in
   const lastCloudPullMsRef = useRef<number>(0);
 
   useEffect(() => {
@@ -685,11 +696,14 @@ export function BookTrackerApp() {
     if (!initialCloudSyncDoneRef.current) return;
     // Coalesce multi-chunk background repair & bibliography syncs into a single settled push
     if (isRepairingLedger || isSyncingAll || syncingAuthorIds.size > 0) return;
+    if (!hasDirtyCloudState(authUserId, state)) return;
 
     const timer = setTimeout(async () => {
+      const latestState = stateRef.current;
+      if (!hasDirtyCloudState(authUserId, latestState)) return;
       try {
         setCloudSyncStatus('syncing');
-        await pushFullStateToCloud(cloudConfig, authUserId, state);
+        await pushFullStateToCloud(cloudConfig, authUserId, latestState);
         setCloudSyncStatus('synced');
         setCloudSyncError(undefined);
       } catch (err) {
@@ -698,7 +712,7 @@ export function BookTrackerApp() {
           err instanceof Error ? err.message : 'Cloud sync failed'
         );
       }
-    }, 800);
+    }, 250);
 
     return () => clearTimeout(timer);
   }, [
@@ -712,12 +726,69 @@ export function BookTrackerApp() {
     syncingAuthorIds.size,
   ]);
 
-  // Pull cloud updates on window focus so native Vellum mobile syncs appear automatically
+  // Live sub-second cross-device Realtime sync + incremental delta pull on focus/heartbeat
   useEffect(() => {
     if (!mounted || demoMode || !cloudConfig || !authUserId) return;
 
-    const refreshFromCloud = async () => {
-      if (document.visibilityState !== 'visible') return;
+    let cancelled = false;
+    let deltaInFlight = false;
+    let queuedDeltaOpts: {
+      explicitBookIds?: string[];
+      explicitAuthorIds?: string[];
+      includeIdManifest?: boolean;
+    } | null = null;
+    let lastHiddenAtMs = 0;
+
+    const applyBroadcastDeletions = (payload: CloudSyncBroadcastPayload) => {
+      const delBooks = payload.deletedBookIds?.filter(Boolean) || [];
+      const delAuthors = payload.deletedAuthorIds?.filter(Boolean) || [];
+      const delChallenges = payload.deletedChallengeIds?.filter(Boolean) || [];
+      if (
+        delBooks.length === 0 &&
+        delAuthors.length === 0 &&
+        delChallenges.length === 0
+      ) {
+        return;
+      }
+      const delBookSet = new Set(delBooks);
+      const delAuthorSet = new Set(delAuthors);
+      const delChallengeSet = new Set(delChallenges);
+
+      setState((prev) => {
+        const nextBooks =
+          delBookSet.size > 0
+            ? prev.books.filter((b) => !delBookSet.has(b.id))
+            : prev.books;
+        const nextAuthors =
+          delAuthorSet.size > 0
+            ? prev.authors.filter((a) => !delAuthorSet.has(a.id))
+            : prev.authors;
+        const nextChallenges =
+          delChallengeSet.size > 0
+            ? prev.challenges.filter((c) => !delChallengeSet.has(c.id))
+            : prev.challenges;
+        if (
+          nextBooks.length === prev.books.length &&
+          nextAuthors.length === prev.authors.length &&
+          nextChallenges.length === prev.challenges.length
+        ) {
+          return prev;
+        }
+        return {
+          authors: nextAuthors,
+          books: nextBooks,
+          challenges: nextChallenges,
+        };
+      });
+    };
+
+    const runDeltaRefresh = async (opts?: {
+      explicitBookIds?: string[];
+      explicitAuthorIds?: string[];
+      includeIdManifest?: boolean;
+      bypassThrottle?: boolean;
+    }) => {
+      if (cancelled) return;
       if (!initialCloudSyncDoneRef.current) return;
       if (
         ledgerRepairRunningRef.current ||
@@ -726,41 +797,192 @@ export function BookTrackerApp() {
       ) {
         return;
       }
+
       const now = Date.now();
-      if (now - lastCloudPullMsRef.current < 4_000) return;
+      if (!opts?.bypassThrottle && now - lastCloudPullMsRef.current < 1_500) {
+        return;
+      }
+
+      if (deltaInFlight) {
+        queuedDeltaOpts = {
+          explicitBookIds: Array.from(
+            new Set([
+              ...(queuedDeltaOpts?.explicitBookIds || []),
+              ...(opts?.explicitBookIds || []),
+            ])
+          ),
+          explicitAuthorIds: Array.from(
+            new Set([
+              ...(queuedDeltaOpts?.explicitAuthorIds || []),
+              ...(opts?.explicitAuthorIds || []),
+            ])
+          ),
+          includeIdManifest: Boolean(
+            queuedDeltaOpts?.includeIdManifest || opts?.includeIdManifest
+          ),
+        };
+        return;
+      }
+
+      deltaInFlight = true;
       lastCloudPullMsRef.current = now;
 
       try {
-        const remote = await pullCloudState(cloudConfig, authUserId);
+        const delta = await pullCloudDelta(cloudConfig, authUserId, {
+          explicitBookIds: opts?.explicitBookIds,
+          explicitAuthorIds: opts?.explicitAuthorIds,
+          includeIdManifest: opts?.includeIdManifest,
+        });
+        if (cancelled) return;
+
+        const hasChanges =
+          delta.authors.length > 0 ||
+          delta.books.length > 0 ||
+          delta.challenges.length > 0 ||
+          Boolean(
+            delta.remoteAuthorIds ||
+              delta.remoteBookIds ||
+              delta.remoteChallengeIds
+          );
+
+        if (!hasChanges) return;
+
         const localToday = getLocalTodayStr();
         setTodayStr((prev) => (prev === localToday ? prev : localToday));
+        const recentGraceCutoffMs = Date.now() - 2 * 60 * 1000;
+
         setState((prev) => {
-          const rawMerged = mergeLocalAndCloudState(prev, remote, {
-            preferCloudDeletions: true,
-          });
-          const { books: cleanedBooks } = consolidateDuplicateBooks(
-            rawMerged.books,
-            localToday
-          );
-          const syncedBooks = syncDismissedWorksWithBooks(cleanedBooks);
-          const merged = { ...rawMerged, books: syncedBooks };
+          let nextAuthors = prev.authors;
+          if (delta.remoteAuthorIds && delta.remoteAuthorIds.size > 0) {
+            nextAuthors = nextAuthors.filter((a) => {
+              if (delta.remoteAuthorIds!.has(a.id)) return true;
+              const ts = Date.parse(a.updatedAt || a.followedAt || '') || 0;
+              return ts >= recentGraceCutoffMs;
+            });
+          }
+          if (delta.authors.length > 0) {
+            const authorMap = new Map<string, FollowedAuthor>();
+            for (const a of nextAuthors) authorMap.set(a.id, a);
+            for (const inc of delta.authors) {
+              const cur = authorMap.get(inc.id);
+              if (!cur || inc.updatedAt >= cur.updatedAt) {
+                authorMap.set(inc.id, inc);
+              }
+            }
+            nextAuthors = Array.from(authorMap.values());
+          }
+
+          let nextChallenges = prev.challenges;
+          if (delta.remoteChallengeIds) {
+            nextChallenges = nextChallenges.filter((c) => {
+              if (delta.remoteChallengeIds!.has(c.id)) return true;
+              const ts = Date.parse(c.updatedAt || c.createdAt || '') || 0;
+              return ts >= recentGraceCutoffMs;
+            });
+          }
+          if (delta.challenges.length > 0) {
+            nextChallenges = mergeChallengeLists(
+              nextChallenges,
+              delta.challenges
+            );
+          }
+
+          let nextBooks = prev.books;
+          if (delta.remoteBookIds && delta.remoteBookIds.size > 0) {
+            nextBooks = nextBooks.filter((b) => {
+              if (delta.remoteBookIds!.has(b.id)) return true;
+              const ts = Date.parse(b.updatedAt || '') || 0;
+              return ts >= recentGraceCutoffMs;
+            });
+          }
+          if (delta.books.length > 0) {
+            const mergedBooks = mergeBookLists(nextBooks, delta.books);
+            const { books: cleanedBooks } = consolidateDuplicateBooks(
+              mergedBooks,
+              localToday
+            );
+            nextBooks = syncDismissedWorksWithBooks(cleanedBooks);
+          }
+
+          const authorsUnchanged =
+            nextAuthors.length === prev.authors.length &&
+            nextAuthors.every(
+              (a, idx) =>
+                a.id === prev.authors[idx]?.id &&
+                a.updatedAt === prev.authors[idx]?.updatedAt
+            );
+
           const prevFp = computeBridgeFingerprint(prev.books, prev.challenges);
-          const nextFp = computeBridgeFingerprint(merged.books, merged.challenges);
-          if (prevFp === nextFp && prev.authors.length === merged.authors.length) {
+          const nextFp = computeBridgeFingerprint(nextBooks, nextChallenges);
+          if (authorsUnchanged && prevFp === nextFp) {
             return prev;
           }
-          return merged;
+          return {
+            authors: nextAuthors,
+            books: nextBooks,
+            challenges: nextChallenges,
+          };
         });
       } catch {
-        // Silent background focus refresh
+        // Silent background delta refresh
+      } finally {
+        deltaInFlight = false;
+        if (!cancelled && queuedDeltaOpts) {
+          const nextOpts = queuedDeltaOpts;
+          queuedDeltaOpts = null;
+          void runDeltaRefresh({ ...nextOpts, bypassThrottle: true });
+        }
       }
     };
 
-    window.addEventListener('focus', refreshFromCloud);
-    document.addEventListener('visibilitychange', refreshFromCloud);
+    const unsubscribeBroadcast = subscribeToCloudSyncBroadcast(
+      cloudConfig,
+      authUserId,
+      (payload) => {
+        applyBroadcastDeletions(payload);
+        void runDeltaRefresh({
+          explicitBookIds: payload.changedBookIds,
+          explicitAuthorIds: payload.changedAuthorIds,
+          bypassThrottle: true,
+        });
+      }
+    );
+
+    const onFocus = () => {
+      if (document.visibilityState !== 'visible') return;
+      const hiddenDurationMs =
+        lastHiddenAtMs > 0 ? Date.now() - lastHiddenAtMs : 0;
+      lastHiddenAtMs = 0;
+      void runDeltaRefresh({
+        includeIdManifest: hiddenDurationMs > 45_000,
+      });
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        lastHiddenAtMs = Date.now();
+        return;
+      }
+      if (document.visibilityState === 'visible') {
+        onFocus();
+      }
+    };
+
+    const heartbeat = setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void runDeltaRefresh({ includeIdManifest: false });
+      }
+    }, 15_000);
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     return () => {
-      window.removeEventListener('focus', refreshFromCloud);
-      document.removeEventListener('visibilitychange', refreshFromCloud);
+      cancelled = true;
+      unsubscribeBroadcast();
+      clearInterval(heartbeat);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [
     mounted,
@@ -861,7 +1083,6 @@ export function BookTrackerApp() {
                     matched.title
                   ) || incoming.coverUrl || matched.coverUrl;
               const nextIsbn = matched.isbn || incoming.isbn;
-              const nextDesc = matched.description || incoming.description;
               const nextPages = matched.pageCount || incoming.pageCount;
               const isDismissedWork =
                 matched.readingStatus === 'none' &&
@@ -878,7 +1099,6 @@ export function BookTrackerApp() {
                 nextIsbn !== matched.isbn ||
                 bestDate.releaseDate !== matched.releaseDate ||
                 bestDate.datePrecision !== matched.datePrecision ||
-                nextDesc !== matched.description ||
                 nextPages !== matched.pageCount ||
                 nextHidden !== Boolean(matched.hidden);
 
@@ -891,7 +1111,6 @@ export function BookTrackerApp() {
                   isbn: nextIsbn,
                   releaseDate: bestDate.releaseDate,
                   datePrecision: bestDate.datePrecision,
-                  description: nextDesc,
                   pageCount: nextPages,
                   hidden: nextHidden,
                   updatedAt: nowIso,
@@ -901,8 +1120,9 @@ export function BookTrackerApp() {
               const isDismissedWork = dismissedWorkKeysRef.current.has(
                 normBookMatchKey(incoming.title, incoming.authorName)
               );
+              const { description: _unusedDesc, ...slimIncoming } = incoming;
               nextBooksMap.set(incoming.id, {
-                ...incoming,
+                ...slimIncoming,
                 authorId: author.id,
                 hidden: Boolean(incoming.hidden || isDismissedWork),
                 updatedAt: nowIso,

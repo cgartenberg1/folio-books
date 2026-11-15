@@ -155,12 +155,35 @@ export function hasEditionDecorationInTitle(title: string): boolean {
   return false;
 }
 
+const PRECOMPILED_CHAINED_TAIL_RE = new RegExp(
+  `^(.*?\\S)\\s*(?:(?::|—|–|-|/)\\s*|\\s+)${CHAINED_EDITION_SUFFIX_RE.source}\\s*$`,
+  'i'
+);
+
+const PRECOMPILED_DECORATION_TAIL_RULES: Array<{
+  tailRe: RegExp;
+  spaceTailRe?: RegExp;
+}> = EDITION_DECORATION_PATTERNS.map((pat) => ({
+  tailRe: new RegExp(`\\s*(?::|—|–|-|/)\\s*${pat.source}\\s*$`, 'i'),
+  spaceTailRe: /edition|paperback|large\s+print|book\s+club|tie-?in/i.test(
+    pat.source
+  )
+    ? new RegExp(`^(.*?\\S)\\s+${pat.source}\\s*$`, 'i')
+    : undefined,
+}));
+
+const CLEAN_TITLE_CACHE = new Map<string, string>();
+
 /**
  * Strips trailing parenthetical/dashed/space-separated edition noise for cleaner display
  * when merging, while preserving genuine titles and subtitles.
  */
 export function cleanDisplayBookTitle(rawTitle: string): string {
-  let t = (rawTitle || '').trim();
+  const key = rawTitle || '';
+  const cached = CLEAN_TITLE_CACHE.get(key);
+  if (cached !== undefined) return cached;
+
+  let t = key.trim();
   if (!t) return t;
 
   // Remove parenthetical/bracketed blocks that only contain edition, format, book club, or Goodreads series (#1) metadata
@@ -180,33 +203,41 @@ export function cleanDisplayBookTitle(rawTitle: string): string {
   );
 
   // Strip trailing chained edition phrases (with or without colon/dash, e.g. "The City of Brass Deluxe Collector's Edition")
-  const chainedTailRe = new RegExp(
-    `^(.*?\\S)\\s*(?:(?::|—|–|-|/)\\s*|\\s+)${CHAINED_EDITION_SUFFIX_RE.source}\\s*$`,
-    'i'
-  );
-  const chainedMatch = t.match(chainedTailRe);
+  const chainedMatch = t.match(PRECOMPILED_CHAINED_TAIL_RE);
   if (chainedMatch?.[1] && chainedMatch[1].trim().length >= 3) {
     t = chainedMatch[1].trim();
   }
 
   // Remove trailing " - Trade Paperback", " : Deluxe Edition", or space-separated retailer/edition suffixes
-  for (const pat of EDITION_DECORATION_PATTERNS) {
-    const tailRe = new RegExp(`\\s*(?::|—|–|-|/)\\s*${pat.source}\\s*$`, 'i');
-    t = t.replace(tailRe, '');
-    if (/edition|paperback|large\s+print|book\s+club|tie-?in/i.test(pat.source)) {
-      const spaceTailRe = new RegExp(`^(.*?\\S)\\s+${pat.source}\\s*$`, 'i');
-      const spaceMatch = t.match(spaceTailRe);
+  for (const rule of PRECOMPILED_DECORATION_TAIL_RULES) {
+    t = t.replace(rule.tailRe, '');
+    if (rule.spaceTailRe) {
+      const spaceMatch = t.match(rule.spaceTailRe);
       if (spaceMatch?.[1] && spaceMatch[1].trim().length >= 3) {
         t = spaceMatch[1].trim();
       }
     }
   }
 
-  return t.replace(/\s{2,}/g, ' ').trim() || rawTitle.trim();
+  const out = t.replace(/\s{2,}/g, ' ').trim() || key.trim();
+  if (CLEAN_TITLE_CACHE.size > 10000) CLEAN_TITLE_CACHE.clear();
+  CLEAN_TITLE_CACHE.set(key, out);
+  return out;
 }
 
+const AUTHOR_KEY_CACHE = new Map<string, string>();
+const WORK_PARTS_CACHE = new Map<string, CanonicalWorkParts>();
+const GLOBAL_CHAINED_SUFFIX_RE = new RegExp(CHAINED_EDITION_SUFFIX_RE.source, 'gi');
+const GLOBAL_DECORATION_PATTERNS = EDITION_DECORATION_PATTERNS.map(
+  (pat) => new RegExp(pat.source, 'gi')
+);
+
 export function normalizeAuthorCanonicalKey(name: string): string {
-  let s = (name || '')
+  const rawKey = name || '';
+  const cached = AUTHOR_KEY_CACHE.get(rawKey);
+  if (cached !== undefined) return cached;
+
+  let s = rawKey
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -216,11 +247,15 @@ export function normalizeAuthorCanonicalKey(name: string): string {
   s = s.replace(/\b([a-z])\.\s*(?=[a-z]\.)/g, '$1');
   s = s.replace(/\b([a-z])\./g, '$1');
 
-  return s
+  const result = s
     .replace(/[^a-z0-9]+/g, ' ')
     .replace(/\b(jr|sr|iii|ii|iv)\b/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+
+  if (AUTHOR_KEY_CACHE.size > 8000) AUTHOR_KEY_CACHE.clear();
+  AUTHOR_KEY_CACHE.set(rawKey, result);
+  return result;
 }
 
 function romanToInt(roman: string): number | null {
@@ -263,14 +298,14 @@ function normalizeSegmentTokens(raw: string, stripLeadingArticle: boolean): stri
     .toLowerCase()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(new RegExp(CHAINED_EDITION_SUFFIX_RE.source, 'gi'), ' ')
+    .replace(GLOBAL_CHAINED_SUFFIX_RE, ' ')
     .replace(/['’‘`]/g, '')
     .replace(/&/g, ' and ');
 
-  s = s.replace(new RegExp(CHAINED_EDITION_SUFFIX_RE.source, 'gi'), ' ');
+  s = s.replace(GLOBAL_CHAINED_SUFFIX_RE, ' ');
 
-  for (const pat of EDITION_DECORATION_PATTERNS) {
-    s = s.replace(new RegExp(pat.source, 'gi'), ' ');
+  for (const pat of GLOBAL_DECORATION_PATTERNS) {
+    s = s.replace(pat, ' ');
   }
 
   // Strip series/book numbering tokens ("book 1", "vol 2", "#1")
@@ -308,14 +343,18 @@ export interface CanonicalWorkParts {
 }
 
 export function parseCanonicalWorkParts(rawTitle: string): CanonicalWorkParts {
-  const volumeNumber = extractExplicitVolumeNumber(rawTitle);
+  const cacheKey = rawTitle || '';
+  const cached = WORK_PARTS_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  const volumeNumber = extractExplicitVolumeNumber(cacheKey);
 
   // Strip parenthetical / bracketed blocks unless doing so empties the title
-  const strippedParens = (rawTitle || '')
+  const strippedParens = cacheKey
     .replace(/\([^)]*\)/g, ' ')
     .replace(/\[[^\]]*\]/g, ' ')
     .trim();
-  const working = strippedParens.length >= 2 ? strippedParens : rawTitle || '';
+  const working = strippedParens.length >= 2 ? strippedParens : cacheKey;
 
   // Split head vs subtitle on `:`, `—`, `–`, or spaced ` - `
   const splitMatch = working.match(/^(.+?)(?:\s*[:—–]\s*|\s+-\s+)(.+)$/);
@@ -342,13 +381,16 @@ export function parseCanonicalWorkParts(rawTitle: string): CanonicalWorkParts {
 
   const fullKey = subKey && !isDescriptiveSub ? `${headKey}::${subKey}` : headKey;
 
-  return {
+  const parsed: CanonicalWorkParts = {
     headKey,
     subKey,
     fullKey,
     isDescriptiveSub,
     volumeNumber,
   };
+  if (WORK_PARTS_CACHE.size > 10000) WORK_PARTS_CACHE.clear();
+  WORK_PARTS_CACHE.set(cacheKey, parsed);
+  return parsed;
 }
 
 /**
@@ -991,8 +1033,9 @@ export function consolidateDuplicateBooks(
       }
     }
 
+    const { description: _unusedDesc, ...slimRaw } = rawItem;
     const item: BookItem = {
-      ...rawItem,
+      ...slimRaw,
       ...sanitizedDate,
       title: protectedManual ? rawItem.title : cleanDisplayBookTitle(rawItem.title),
     };

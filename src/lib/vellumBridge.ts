@@ -2,6 +2,7 @@ import {
   areSameCanonicalWork,
   getCanonicalWorkKey,
   isProtectedUserManualBook,
+  normalizeAuthorCanonicalKey,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
   reconcileRefreshedBookDate,
@@ -162,15 +163,33 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
   };
 }
 
+function getAuthorSurnameBucket(authorName: string): string {
+  const norm = normalizeAuthorCanonicalKey(authorName);
+  const parts = norm.split(' ').filter(Boolean);
+  return parts[parts.length - 1] || norm || '_unknown';
+}
+
 export function mergeBookLists(base: BookItem[], incoming: BookItem[]): BookItem[] {
   const byId = new Map<string, BookItem>();
   const normToId = new Map<string, string>();
   const vellumToId = new Map<string, string>();
+  const bucketIds = new Map<string, Set<string>>();
 
-  for (const item of base) {
+  const registerItem = (item: BookItem) => {
     byId.set(item.id, item);
     normToId.set(normBookMatchKey(item.title, item.authorName), item.id);
     if (item.vellumBookId) vellumToId.set(item.vellumBookId, item.id);
+    const bKey = getAuthorSurnameBucket(item.authorName);
+    let set = bucketIds.get(bKey);
+    if (!set) {
+      set = new Set<string>();
+      bucketIds.set(bKey, set);
+    }
+    set.add(item.id);
+  };
+
+  for (const item of base) {
+    registerItem(item);
   }
 
   for (const inc of incoming) {
@@ -181,27 +200,30 @@ export function mergeBookLists(base: BookItem[], incoming: BookItem[]): BookItem
       normToId.get(norm);
 
     if (!matchedId) {
-      for (const existing of Array.from(byId.values())) {
-        if (areSameCanonicalWork(existing, inc)) {
-          matchedId = existing.id;
-          break;
+      const bKey = getAuthorSurnameBucket(inc.authorName);
+      const candIds = bucketIds.get(bKey);
+      if (candIds) {
+        for (const candId of Array.from(candIds)) {
+          const existing = byId.get(candId);
+          if (existing && areSameCanonicalWork(existing, inc)) {
+            matchedId = existing.id;
+            break;
+          }
         }
       }
     }
 
     if (matchedId && byId.has(matchedId)) {
-      const merged = mergeBookPair(byId.get(matchedId)!, inc);
+      const prevExisting = byId.get(matchedId)!;
+      const merged = mergeBookPair(prevExisting, inc);
       if (merged.id !== matchedId) {
         byId.delete(matchedId);
+        bucketIds.get(getAuthorSurnameBucket(prevExisting.authorName))?.delete(matchedId);
       }
-      byId.set(merged.id, merged);
       normToId.set(norm, merged.id);
-      normToId.set(normBookMatchKey(merged.title, merged.authorName), merged.id);
-      if (merged.vellumBookId) vellumToId.set(merged.vellumBookId, merged.id);
+      registerItem(merged);
     } else {
-      byId.set(inc.id, inc);
-      normToId.set(norm, inc.id);
-      if (inc.vellumBookId) vellumToId.set(inc.vellumBookId, inc.id);
+      registerItem(inc);
     }
   }
 
