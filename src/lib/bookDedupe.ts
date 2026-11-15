@@ -480,6 +480,14 @@ function isAlreadyReleased(
   return false;
 }
 
+export function isProtectedUserManualBook(
+  book: Pick<BookItem, 'id' | 'isManual' | 'userEdited'>
+): boolean {
+  return Boolean(
+    book.userEdited || (book.isManual && book.id.startsWith('manual:book:'))
+  );
+}
+
 export function pickCanonicalReleaseDate(
   rawA: BookItem,
   rawB: BookItem,
@@ -488,10 +496,10 @@ export function pickCanonicalReleaseDate(
   bUsersCount?: number
 ): { releaseDate?: string; datePrecision: DatePrecision } {
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
-  const sanA = rawA.isManual
+  const sanA = isProtectedUserManualBook(rawA)
     ? { releaseDate: rawA.releaseDate, datePrecision: rawA.datePrecision }
     : sanitizeCatalogReleaseDate(rawA.releaseDate, rawA.datePrecision, currentYear);
-  const sanB = rawB.isManual
+  const sanB = isProtectedUserManualBook(rawB)
     ? { releaseDate: rawB.releaseDate, datePrecision: rawB.datePrecision }
     : sanitizeCatalogReleaseDate(rawB.releaseDate, rawB.datePrecision, currentYear);
 
@@ -634,11 +642,7 @@ export function reconcileRefreshedBookDate(
   todayStr: string
 ): { releaseDate?: string; datePrecision: DatePrecision } {
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
-  const isUserManual = Boolean(
-    existing.isManual &&
-      !existing.id.startsWith('vellum:') &&
-      !existing.id.startsWith('manual:batch:')
-  );
+  const isUserManual = isProtectedUserManualBook(existing);
   if (isUserManual && existing.releaseDate && existing.datePrecision !== 'unknown') {
     return {
       releaseDate: existing.releaseDate,
@@ -861,6 +865,7 @@ export function mergeCanonicalBookPair(
         ? false
         : Boolean(primary.isOneOff || secondary.isOneOff),
     isManual: Boolean(primary.isManual && secondary.isManual),
+    userEdited: Boolean(primary.userEdited || secondary.userEdited) || undefined,
     hidden: mergedHidden,
     readingStatus: bestStatus,
     addedToTodoAt:
@@ -911,7 +916,8 @@ export function consolidateDuplicateBooks(
   const currentYear = Number(todayStr.slice(0, 4)) || new Date().getFullYear();
 
   for (const rawItem of books) {
-    let sanitizedDate = rawItem.isManual
+    const protectedManual = isProtectedUserManualBook(rawItem);
+    let sanitizedDate = protectedManual
       ? { releaseDate: rawItem.releaseDate, datePrecision: rawItem.datePrecision }
       : sanitizeCatalogReleaseDate(
           rawItem.releaseDate,
@@ -922,7 +928,7 @@ export function consolidateDuplicateBooks(
     // If the user finished reading this book on an earlier date (e.g. Mar 8, 2025 vs a Nov 11, 2025 reissue,
     // or 2016 vs a 2024 reissue), never display a release date after the date the book was finished.
     if (
-      !rawItem.isManual &&
+      !protectedManual &&
       rawItem.finishedAt &&
       /^\d{4}-\d{2}-\d{2}$/.test(rawItem.finishedAt) &&
       rawItem.finishedAt <= todayStr &&
@@ -947,13 +953,13 @@ export function consolidateDuplicateBooks(
     const item: BookItem = {
       ...rawItem,
       ...sanitizedDate,
-      title: rawItem.isManual ? rawItem.title : cleanDisplayBookTitle(rawItem.title),
+      title: protectedManual ? rawItem.title : cleanDisplayBookTitle(rawItem.title),
     };
 
     // Drop pure un-engaged multi-book box sets / summaries / foreign-edition noise
     const isUnengagedCatalogItem =
       item.readingStatus === 'none' &&
-      !item.isManual &&
+      !protectedManual &&
       !item.isOneOff &&
       !item.rating &&
       !item.notes &&

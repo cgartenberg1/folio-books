@@ -123,7 +123,7 @@ export function UpcomingTab({
         dek={dek}
         actions={
           <>
-            {authors.length > 0 && (
+            {(authors.length > 0 || books.length > 0) && (
               <button
                 type="button"
                 onClick={onSyncAllAuthors}

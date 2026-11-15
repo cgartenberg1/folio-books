@@ -1,8 +1,10 @@
 import {
   areSameCanonicalWork,
   getCanonicalWorkKey,
+  isProtectedUserManualBook,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
+  reconcileRefreshedBookDate,
 } from '@/lib/bookDedupe';
 import { isCustomCoverUrl } from '@/lib/coverArt';
 import { getLocalTodayStr, parseReleaseDateInput } from '@/lib/dates';
@@ -70,20 +72,24 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
   const bVelTs = toTimestamp(b.vellumLastReadAt);
   const velSource = bVelTs >= aVelTs ? b : a;
 
-  const primaryHasManualDate =
-    Boolean(primary.isManual && !primary.id.startsWith('vellum:') && primary.releaseDate);
+  const todayStr = getLocalTodayStr();
+  const primaryHasManualDate = Boolean(
+    isProtectedUserManualBook(primary) && primary.releaseDate
+  );
   const bestDate = primaryHasManualDate
     ? { releaseDate: primary.releaseDate, datePrecision: primary.datePrecision }
-    : pickCanonicalReleaseDate(a, b, getLocalTodayStr());
+    : a.id === b.id
+    ? reconcileRefreshedBookDate(secondary, primary, todayStr)
+    : pickCanonicalReleaseDate(a, b, todayStr);
 
   return {
     ...secondary,
     ...primary,
     id: a.id, // preserve stable original ID in Folio
-    title:
-      primary.isManual && !primary.id.startsWith('vellum:')
-        ? primary.title
-        : pickCleanerTitle(primary.title, secondary.title),
+    title: isProtectedUserManualBook(primary)
+      ? primary.title
+      : pickCleanerTitle(primary.title, secondary.title),
+    userEdited: Boolean(primary.userEdited || secondary.userEdited) || undefined,
     authorId: primary.authorId || secondary.authorId,
     coverUrl:
       isCustomCoverUrl(secondary.coverUrl) && !isCustomCoverUrl(primary.coverUrl)
@@ -314,7 +320,7 @@ export function applyVellumSyncToBooks(params: {
         datePrecision: parsedMutDate.datePrecision,
         description: mut.description,
         isOneOff: true,
-        isManual: true,
+        isManual: false,
         readingStatus: mut.readingStatus,
         addedToTodoAt: mut.readingStatus === 'todo' ? mutTime : undefined,
         finishedAt:
@@ -397,7 +403,7 @@ export function applyVellumSyncToBooks(params: {
         datePrecision: parsedVbDate.datePrecision,
         description: vb.description,
         isOneOff: true,
-        isManual: true,
+        isManual: false,
         readingStatus: isCompletedInVellum ? 'read' : 'todo',
         addedToTodoAt: !isCompletedInVellum ? readIso : undefined,
         finishedAt: isCompletedInVellum ? formatDateYmd(vb.lastReadAt) : undefined,

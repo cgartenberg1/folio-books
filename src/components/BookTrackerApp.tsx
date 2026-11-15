@@ -35,6 +35,7 @@ import {
   consolidateDuplicateBooks,
   getCanonicalWorkKey,
   hasEditionDecorationInTitle,
+  isProtectedUserManualBook,
   isStrictSecondaryReissueTitle,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
@@ -146,6 +147,9 @@ export function BookTrackerApp() {
     new Set()
   );
   const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [isRepairingLedger, setIsRepairingLedger] = useState(false);
+  const isSyncingAllRef = useRef(false);
+  const syncingAuthorCountRef = useRef(0);
 
   // Cross-tab navigation helpers
   const [searchPrefill, setSearchPrefill] = useState<string | undefined>();
@@ -545,6 +549,13 @@ export function BookTrackerApp() {
     const refreshFromCloud = async () => {
       if (document.visibilityState !== 'visible') return;
       if (!initialCloudSyncDoneRef.current) return;
+      if (
+        ledgerRepairRunningRef.current ||
+        isSyncingAllRef.current ||
+        syncingAuthorCountRef.current > 0
+      ) {
+        return;
+      }
       const now = Date.now();
       if (now - lastCloudPullMsRef.current < 10_000) return;
       lastCloudPullMsRef.current = now;
@@ -595,6 +606,7 @@ export function BookTrackerApp() {
   // Sync bibliography for a single followed author
   const syncAuthorCatalog = useCallback(
     async (author: FollowedAuthor, silent = false, forceRefresh = false) => {
+      syncingAuthorCountRef.current += 1;
       setSyncingAuthorIds((prev) => new Set(prev).add(author.id));
       try {
         const headers: Record<string, string> = {};
@@ -641,12 +653,7 @@ export function BookTrackerApp() {
             if (matched) {
               matchedExistingIds.add(matched.id);
               // Preserve user state (readingStatus, hidden, notes, rating, one-off flag)
-              const isVellumAutoEntry = matched.id.startsWith('vellum:');
-              const isUserManualEntry = Boolean(
-                matched.isManual &&
-                  !isVellumAutoEntry &&
-                  !matched.id.startsWith('manual:batch:')
-              );
+              const isUserManualEntry = isProtectedUserManualBook(matched);
               const bestDate = reconcileRefreshedBookDate(
                 matched,
                 incoming,
@@ -755,6 +762,10 @@ export function BookTrackerApp() {
           );
         }
       } finally {
+        syncingAuthorCountRef.current = Math.max(
+          0,
+          syncingAuthorCountRef.current - 1
+        );
         setSyncingAuthorIds((prev) => {
           const next = new Set(prev);
           next.delete(author.id);
@@ -778,21 +789,21 @@ export function BookTrackerApp() {
     };
   }, []);
 
-  const repairTrackedBookDatesAndReissues = useCallback(async () => {
-    if (demoMode || ledgerRepairRunningRef.current) return 0;
+  const repairTrackedBookDatesAndReissues = useCallback(async (): Promise<{
+    updatedCount: number;
+    ok: boolean;
+  }> => {
+    if (demoMode || ledgerRepairRunningRef.current) {
+      return { updatedCount: 0, ok: false };
+    }
     ledgerRepairRunningRef.current = true;
+    setIsRepairingLedger(true);
 
     try {
       const localToday = getLocalTodayStr();
       const canAutoRepairBook = (b: BookItem) => {
         if (b.id.startsWith('demo:')) return false;
-        if (
-          b.isManual &&
-          !b.id.startsWith('vellum:') &&
-          !b.id.startsWith('manual:batch:')
-        ) {
-          return false;
-        }
+        if (isProtectedUserManualBook(b)) return false;
         return true;
       };
       const hasImpossibleFinishVsRelease = (b: BookItem): boolean =>
@@ -804,27 +815,22 @@ export function BookTrackerApp() {
         );
       const candidatePriority = (b: BookItem): number => {
         if (
-          !b.releaseDate ||
-          b.datePrecision === 'unknown' ||
           hasImpossibleFinishVsRelease(b) ||
           hasEditionDecorationInTitle(b.title) ||
-          isStrictSecondaryReissueTitle(b.title)
+          isStrictSecondaryReissueTitle(b.title) ||
+          Boolean(b.releaseDate && b.releaseDate >= '2024')
         ) {
           return 0;
         }
-        if (b.datePrecision !== 'day' || /-(01-01|12-31)$/.test(b.releaseDate)) {
+        if (!b.releaseDate || b.datePrecision === 'unknown') {
           return 1;
         }
-        if (b.releaseDate >= '2025') {
-          return 2;
-        }
-        return 3;
+        return 2;
       };
       const candidates = stateRef.current.books
         .filter((b) => {
           if (!canAutoRepairBook(b)) return false;
-          if (!b.releaseDate || b.datePrecision !== 'day') return true;
-          if (/-(01-01|12-31)$/.test(b.releaseDate)) return true;
+          if (!b.releaseDate || b.datePrecision === 'unknown') return true;
           if (hasImpossibleFinishVsRelease(b)) return true;
           if (b.releaseDate >= '2024') return true;
           if (
@@ -833,16 +839,26 @@ export function BookTrackerApp() {
           ) {
             return true;
           }
+          if (
+            b.releaseDate >= '2020' &&
+            (b.datePrecision !== 'day' || /-(01-01|12-31)$/.test(b.releaseDate))
+          ) {
+            return true;
+          }
           return false;
         })
         .sort((a, b) => {
           const hidDiff = Number(Boolean(a.hidden)) - Number(Boolean(b.hidden));
           if (hidDiff !== 0) return hidDiff;
-          return candidatePriority(a) - candidatePriority(b);
+          const prioDiff = candidatePriority(a) - candidatePriority(b);
+          if (prioDiff !== 0) return prioDiff;
+          return (b.releaseDate || '').localeCompare(a.releaseDate || '');
         })
-        .slice(0, 600);
+        .slice(0, 300);
 
-      if (candidates.length === 0) return 0;
+      if (candidates.length === 0) {
+        return { updatedCount: 0, ok: true };
+      }
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
@@ -853,10 +869,14 @@ export function BookTrackerApp() {
       }
 
       let updatedCount = 0;
-      const chunkSize = 20;
+      let allChunksOk = true;
+      const chunkSize = 25;
 
       for (let i = 0; i < candidates.length; i += chunkSize) {
-        if (unmountedRef.current) break;
+        if (unmountedRef.current) {
+          allChunksOk = false;
+          break;
+        }
         const slice = candidates.slice(i, i + chunkSize);
         const items = slice.map((b) => ({
           clientKey: b.id,
@@ -866,12 +886,21 @@ export function BookTrackerApp() {
           isbn10: b.isbn && b.isbn.length === 10 ? b.isbn : undefined,
         }));
 
-        const res = await fetch('/api/import/enrich', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ action: 'books', items }),
-        });
-        if (!res.ok) continue;
+        let res: Response;
+        try {
+          res = await fetch('/api/import/enrich', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ action: 'books', items }),
+          });
+        } catch {
+          allChunksOk = false;
+          continue;
+        }
+        if (!res.ok) {
+          allChunksOk = false;
+          continue;
+        }
         const payload = await res.json();
         const matches = payload?.matches || {};
         if (Object.keys(matches).length === 0) continue;
@@ -895,6 +924,7 @@ export function BookTrackerApp() {
                 releaseDate: m.releaseDate,
                 datePrecision: m.datePrecision,
                 isManual: false,
+                userEdited: false,
               },
               localToday
             );
@@ -963,11 +993,14 @@ export function BookTrackerApp() {
         }
       }
 
-      return updatedCount;
+      return { updatedCount, ok: allChunksOk && !unmountedRef.current };
     } catch {
-      return 0;
+      return { updatedCount: 0, ok: false };
     } finally {
       ledgerRepairRunningRef.current = false;
+      if (!unmountedRef.current) {
+        setIsRepairingLedger(false);
+      }
     }
   }, [demoMode, cloudConfig, authUserId]);
 
@@ -983,7 +1016,7 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v4:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v5:${authUserId || 'local'}`;
     if (autoRepairInFlightKeyRef.current === repairKey) return;
     try {
       if (localStorage.getItem(repairKey) === '1') return;
@@ -995,7 +1028,7 @@ export function BookTrackerApp() {
 
     (async () => {
       try {
-        await repairTrackedBookDatesAndReissues();
+        const repairRes = await repairTrackedBookDatesAndReissues();
         const authorsSnapshot = [...stateRef.current.authors];
         for (let i = 0; i < authorsSnapshot.length; i++) {
           if (unmountedRef.current) return;
@@ -1004,7 +1037,7 @@ export function BookTrackerApp() {
             await new Promise((r) => setTimeout(r, 150));
           }
         }
-        if (!unmountedRef.current) {
+        if (repairRes.ok && !unmountedRef.current) {
           try {
             localStorage.setItem(repairKey, '1');
           } catch {}
@@ -1032,18 +1065,20 @@ export function BookTrackerApp() {
     ) {
       return;
     }
+    isSyncingAllRef.current = true;
     setIsSyncingAll(true);
     try {
+      await repairTrackedBookDatesAndReissues();
       for (const author of state.authors) {
         await syncAuthorCatalog(author, true, true);
       }
-      await repairTrackedBookDatesAndReissues();
       showToast(
         state.authors.length > 0
           ? `Refreshed & deduplicated ${state.authors.length} authors + tracked dates`
           : 'Refreshed tracked book release dates'
       );
     } finally {
+      isSyncingAllRef.current = false;
       setIsSyncingAll(false);
     }
   }, [
@@ -1463,7 +1498,12 @@ export function BookTrackerApp() {
               releaseDate: parsedDate.releaseDate,
               datePrecision: parsedDate.datePrecision,
               isOneOff: data.isOneOff,
-              isManual: Boolean(b.isManual || userEditedBiblio),
+              userEdited: Boolean(b.userEdited || userEditedBiblio),
+              isManual: Boolean(
+                (b.isManual && b.id.startsWith('manual:book:')) ||
+                  b.userEdited ||
+                  userEditedBiblio
+              ),
               readingStatus: data.readingStatus,
               addedToTodoAt:
                 data.readingStatus === 'todo'
@@ -1490,6 +1530,7 @@ export function BookTrackerApp() {
           datePrecision: parsedDate.datePrecision,
           isOneOff: data.isOneOff,
           isManual: true,
+          userEdited: true,
           readingStatus: data.readingStatus,
           addedToTodoAt: data.readingStatus === 'todo' ? nowIso : undefined,
           finishedAt:
@@ -2100,7 +2141,9 @@ export function BookTrackerApp() {
             books={upcomingBooks}
             authors={state.authors}
             todayStr={todayStr}
-            isSyncing={isSyncingAll || syncingAuthorIds.size > 0}
+            isSyncing={
+              isSyncingAll || isRepairingLedger || syncingAuthorIds.size > 0
+            }
             onToggleTodo={handleToggleTodo}
             onToggleRead={handleToggleRead}
             onEditBook={(book) => setBookModalState({ open: true, book })}
@@ -2126,6 +2169,10 @@ export function BookTrackerApp() {
             books={releasedBooks}
             authors={state.authors}
             todayStr={todayStr}
+            isSyncing={
+              isSyncingAll || isRepairingLedger || syncingAuthorIds.size > 0
+            }
+            onSyncAllAuthors={handleSyncAllAuthors}
             selectedAuthorIdFilter={releasedAuthorFilter}
             onClearAuthorFilter={() => setReleasedAuthorFilter(null)}
             onSelectAuthorFilter={(authorId) => setReleasedAuthorFilter(authorId)}

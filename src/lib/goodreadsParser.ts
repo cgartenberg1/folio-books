@@ -274,9 +274,7 @@ export function parseGoodreadsCsv(csvText: string): GoodreadsParseResult {
       yearPubCol !== -1 ? Number(cleanGoodreadsExcelField(row[yearPubCol])) : NaN;
 
     let releaseYear: number | undefined;
-    if (!Number.isNaN(pubYear) && pubYear > new Date().getFullYear()) {
-      releaseYear = pubYear;
-    } else if (!Number.isNaN(origYear) && origYear >= 1000 && origYear <= 2999) {
+    if (!Number.isNaN(origYear) && origYear >= 1000 && origYear <= 2999) {
       releaseYear = origYear;
     } else if (!Number.isNaN(pubYear) && pubYear >= 1000 && pubYear <= 2999) {
       releaseYear = pubYear;

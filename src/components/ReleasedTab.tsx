@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
-import { Plus, Search, X } from 'lucide-react';
+import { Plus, RefreshCw, Search, X } from 'lucide-react';
 import { BookCard } from '@/components/BookCard';
 import {
   countWord,
@@ -18,6 +18,8 @@ interface ReleasedTabProps {
   books: BookItem[];
   authors: FollowedAuthor[];
   todayStr: string;
+  isSyncing?: boolean;
+  onSyncAllAuthors?: () => void;
   selectedAuthorIdFilter: string | null;
   onClearAuthorFilter: () => void;
   onSelectAuthorFilter: (authorId: string) => void;
@@ -36,6 +38,8 @@ export function ReleasedTab({
   books,
   authors,
   todayStr,
+  isSyncing = false,
+  onSyncAllAuthors,
   selectedAuthorIdFilter,
   onClearAuthorFilter,
   onSelectAuthorFilter,
@@ -133,10 +137,27 @@ export function ReleasedTab({
               )}, newest first. You have read ${countWord(readCount)} of them.`
         }
         actions={
-          <button type="button" onClick={onAddManualBook} className="btn btn-primary btn-sm">
-            <Plus strokeWidth={1.75} className="h-3.5 w-3.5" />
-            Add a book
-          </button>
+          <>
+            {onSyncAllAuthors && (books.length > 0 || authors.length > 0) && (
+              <button
+                type="button"
+                onClick={onSyncAllAuthors}
+                disabled={isSyncing}
+                className="btn btn-outline btn-sm"
+                title="Refresh publication dates and deduplicate editions"
+              >
+                <RefreshCw
+                  strokeWidth={1.5}
+                  className={`h-3.5 w-3.5 ${isSyncing ? 'animate-spin' : ''}`}
+                />
+                {isSyncing ? 'Consulting catalogues…' : 'Refresh'}
+              </button>
+            )}
+            <button type="button" onClick={onAddManualBook} className="btn btn-primary btn-sm">
+              <Plus strokeWidth={1.75} className="h-3.5 w-3.5" />
+              Add a book
+            </button>
+          </>
         }
       />
 

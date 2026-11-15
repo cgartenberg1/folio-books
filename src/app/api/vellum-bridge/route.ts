@@ -152,6 +152,12 @@ function mapSupabaseBookRow(row: Record<string, unknown>): BookItem {
     isbn: row.isbn ? String(row.isbn) : undefined,
     isOneOff: Boolean(row.is_one_off),
     isManual: Boolean(row.is_manual),
+    userEdited:
+      row.is_manual &&
+      !String(row.id || '').startsWith('vellum:') &&
+      !String(row.id || '').startsWith('manual:batch:')
+        ? true
+        : undefined,
     hidden: Boolean(row.hidden),
     readingStatus: (row.reading_status || 'none') as ReadingStatus,
     addedToTodoAt: row.added_to_todo_at ? String(row.added_to_todo_at) : undefined,
@@ -185,7 +191,9 @@ function mapBookItemToSupabaseRow(b: BookItem) {
     page_count: b.pageCount ?? null,
     isbn: b.isbn ?? null,
     is_one_off: b.isOneOff,
-    is_manual: b.isManual,
+    is_manual: Boolean(
+      b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
+    ),
     hidden: Boolean(b.hidden),
     reading_status: b.readingStatus,
     added_to_todo_at: b.addedToTodoAt ?? null,

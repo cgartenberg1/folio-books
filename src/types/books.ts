@@ -41,6 +41,8 @@ export interface BookItem {
   isOneOff: boolean;
   /** Added manually by the user */
   isManual: boolean;
+  /** True when the user explicitly edited bibliographic fields (title/author/releaseDate) in Folio */
+  userEdited?: boolean;
   /** Dismissed/hidden from feed so sync doesn't re-add unwanted editions */
   hidden?: boolean;
   readingStatus: ReadingStatus;
