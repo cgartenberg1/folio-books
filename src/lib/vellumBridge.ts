@@ -130,6 +130,14 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
     source: winnerSource,
     externalId: winnerExternalId,
     hidden: mergedHidden,
+    isOneOff: mergedHidden
+      ? false
+      : Boolean(primary.isOneOff || secondary.isOneOff),
+    trackedFromUpcoming:
+      !mergedHidden &&
+      Boolean(primary.trackedFromUpcoming || secondary.trackedFromUpcoming)
+        ? true
+        : undefined,
     title: isProtectedUserManualBook(primary)
       ? primary.title
       : pickCleanerTitle(primary.title, secondary.title),
@@ -141,7 +149,7 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
         : primary.coverUrl || secondary.coverUrl,
     releaseDate: bestDate.releaseDate,
     datePrecision: bestDate.datePrecision,
-    description: primary.description || secondary.description,
+    description: undefined,
     pageCount: primary.pageCount || secondary.pageCount,
     isbn: primary.isbn || secondary.isbn,
     rating: primary.rating ?? secondary.rating,

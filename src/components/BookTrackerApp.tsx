@@ -32,13 +32,16 @@ import { UpcomingTab } from '@/components/UpcomingTab';
 import { Fleuron, toRoman } from '@/components/ui';
 import {
   areSameCanonicalWork,
+  computeTrackedFromUpcoming,
   consolidateDuplicateBooks,
   getCanonicalWorkKey,
   hasEditionDecorationInTitle,
+  isCuratedReleasedBook,
   isProtectedUserManualBook,
   isStrictSecondaryReissueTitle,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
+  pruneUnengagedAuthorBacklist,
   reconcileRefreshedBookDate,
 } from '@/lib/bookDedupe';
 import { isCustomCoverUrl, pickPreferredCoverUrl } from '@/lib/coverArt';
@@ -59,6 +62,7 @@ import {
   signOutUser,
   subscribeToAuthChanges,
   subscribeToCloudSyncBroadcast,
+  syncCloudSettingsPreference,
   updateUserProfile,
   upsertCloudBooks,
 } from '@/lib/cloudSync';
@@ -99,6 +103,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   supabaseUrl: '',
   supabaseAnonKey: '',
   vellumUrl: 'http://localhost:3030',
+  includeAuthorBacklist: false,
 };
 
 const EMPTY_STATE: TrackerState = {
@@ -294,6 +299,14 @@ export function BookTrackerApp() {
         }
       }
 
+      let loadedIncludeBacklist = false;
+      const rawSettings = localStorage.getItem(LOCAL_SETTINGS_KEY);
+      if (rawSettings) {
+        const parsedSettings = JSON.parse(rawSettings);
+        loadedIncludeBacklist = Boolean(parsedSettings?.includeAuthorBacklist);
+        setSettings((prev) => ({ ...prev, ...parsedSettings }));
+      }
+
       const rawState = localStorage.getItem(LOCAL_STATE_KEY);
       const isDemo = new URL(window.location.href).searchParams.has('demo');
       if (isDemo) {
@@ -308,21 +321,19 @@ export function BookTrackerApp() {
             parsed.books || [],
             localToday
           );
-          if (removedIds.length > 0) {
-            deletedBookIdsRef.current.push(...removedIds);
-          }
           const syncedBooks = syncDismissedWorksWithBooks(cleanedBooks);
+          const { books: scopedBooks, prunedIds } = loadedIncludeBacklist
+            ? { books: syncedBooks, prunedIds: [] as string[] }
+            : pruneUnengagedAuthorBacklist(syncedBooks, localToday);
+          if (removedIds.length > 0 || prunedIds.length > 0) {
+            deletedBookIdsRef.current.push(...removedIds, ...prunedIds);
+          }
           setState({
             authors: parsed.authors || [],
-            books: syncedBooks,
+            books: scopedBooks,
             challenges: parsed.challenges || [],
           });
         }
-      }
-
-      const rawSettings = localStorage.getItem(LOCAL_SETTINGS_KEY);
-      if (rawSettings) {
-        setSettings((prev) => ({ ...prev, ...JSON.parse(rawSettings) }));
       }
 
       // Check URL for friend group invite link (?join=CODE)
@@ -406,7 +417,7 @@ export function BookTrackerApp() {
         b: books
           .map(
             (x) =>
-              `${x.id}|${x.updatedAt}|${x.hidden ? 1 : 0}|${x.releaseDate || ''}|${x.datePrecision}|${x.readingStatus}|${x.finishedAt || ''}|${
+              `${x.id}|${x.updatedAt}|${x.hidden ? 1 : 0}|${x.trackedFromUpcoming ? 1 : 0}|${x.releaseDate || ''}|${x.datePrecision}|${x.readingStatus}|${x.finishedAt || ''}|${
                 x.rating ?? ''
               }|${x.notes || ''}|${x.vellumProgress ?? ''}|${x.vellumChapter || ''}`
           )
@@ -547,6 +558,7 @@ export function BookTrackerApp() {
         setTodayStr((prev) => (prev === localToday ? prev : localToday));
 
         let settledBooksCount = 0;
+        const allowFullBacklist = Boolean(activeSettings.includeAuthorBacklist);
 
         if (shouldReplaceLocal) {
           // Different account or explicit "Reload from cloud": replace local cache cleanly
@@ -556,16 +568,19 @@ export function BookTrackerApp() {
             consolidateDuplicateBooks(remote.books, localToday);
           const syncedRemoteBooks =
             syncDismissedWorksWithBooks(cleanedRemoteBooks);
-          const keepIds = new Set(syncedRemoteBooks.map((b) => b.id));
+          const { books: scopedRemoteBooks, prunedIds } = allowFullBacklist
+            ? { books: syncedRemoteBooks, prunedIds: [] as string[] }
+            : pruneUnengagedAuthorBacklist(syncedRemoteBooks, localToday);
+          const keepIds = new Set(scopedRemoteBooks.map((b) => b.id));
           const orphanRemoteIds = remote.books
             .map((b) => b.id)
             .filter((id) => !keepIds.has(id));
           const allCleanupIds = Array.from(
-            new Set([...removedIds, ...orphanRemoteIds])
+            new Set([...removedIds, ...prunedIds, ...orphanRemoteIds])
           );
 
-          setState({ ...remote, books: syncedRemoteBooks });
-          settledBooksCount = syncedRemoteBooks.filter((b) => !b.hidden).length;
+          setState({ ...remote, books: scopedRemoteBooks });
+          settledBooksCount = scopedRemoteBooks.filter((b) => !b.hidden).length;
 
           if (allCleanupIds.length > 0) {
             await deleteCloudRecords(
@@ -577,10 +592,10 @@ export function BookTrackerApp() {
           }
           await pushFullStateToCloud(cfg, targetUserId, {
             ...remote,
-            books: syncedRemoteBooks,
+            books: scopedRemoteBooks,
           });
         } else {
-          // Same user or first-time upgrade: drop unengaged local ghosts already pruned in cloud
+          // Same user or first-time upgrade: drop unengaged local ghosts & backlist bloat
           const rawMerged = mergeLocalAndCloudState(stateRef.current, remote, {
             preferCloudDeletions: prevOwnerId === targetUserId,
           });
@@ -588,16 +603,19 @@ export function BookTrackerApp() {
             consolidateDuplicateBooks(rawMerged.books, localToday);
           const syncedMergedBooks =
             syncDismissedWorksWithBooks(cleanedMergedBooks);
-          const merged = { ...rawMerged, books: syncedMergedBooks };
+          const { books: scopedMergedBooks, prunedIds } = allowFullBacklist
+            ? { books: syncedMergedBooks, prunedIds: [] as string[] }
+            : pruneUnengagedAuthorBacklist(syncedMergedBooks, localToday);
+          const merged = { ...rawMerged, books: scopedMergedBooks };
           setState(merged);
-          settledBooksCount = syncedMergedBooks.filter((b) => !b.hidden).length;
+          settledBooksCount = scopedMergedBooks.filter((b) => !b.hidden).length;
 
-          const keepIds = new Set(syncedMergedBooks.map((b) => b.id));
+          const keepIds = new Set(scopedMergedBooks.map((b) => b.id));
           const orphanRemoteIds = remote.books
             .map((b) => b.id)
             .filter((id) => !keepIds.has(id));
           const allCleanupIds = Array.from(
-            new Set([...removedIds, ...orphanRemoteIds])
+            new Set([...removedIds, ...prunedIds, ...orphanRemoteIds])
           );
 
           if (allCleanupIds.length > 0) {
@@ -649,10 +667,23 @@ export function BookTrackerApp() {
     }
 
     let active = true;
+    const applyRemoteBacklistPref = (remotePref?: boolean) => {
+      if (typeof remotePref !== 'boolean') return;
+      setSettings((prev) => {
+        if (Boolean(prev.includeAuthorBacklist) === remotePref) return prev;
+        const next = { ...prev, includeAuthorBacklist: remotePref };
+        settingsRef.current = next;
+        try {
+          localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    };
 
     getCurrentSessionAndProfile(cloudConfig)
       .then((snap) => {
         if (!active) return;
+        applyRemoteBacklistPref(snap.includeAuthorBacklist);
         setAuthUserId(snap.userId);
         setAuthEmail(snap.email);
         setUserProfile(snap.profile);
@@ -661,6 +692,7 @@ export function BookTrackerApp() {
 
     const unsubscribe = subscribeToAuthChanges(cloudConfig, (snap) => {
       if (!active) return;
+      applyRemoteBacklistPref(snap.includeAuthorBacklist);
       setAuthUserId((prev) => {
         if (prev !== snap.userId) {
           initialCloudSyncDoneRef.current = false;
@@ -681,12 +713,12 @@ export function BookTrackerApp() {
   useEffect(() => {
     if (!mounted || demoMode) return;
     if (cloudConfig && authUserId) {
-      triggerCloudPullAndPush(settings, authUserId);
+      triggerCloudPullAndPush(settingsRef.current, authUserId);
     } else {
       initialCloudSyncDoneRef.current = false;
       setCloudSyncStatus('local');
     }
-  }, [mounted, demoMode, cloudConfig, authUserId, settings, triggerCloudPullAndPush]);
+  }, [mounted, demoMode, cloudConfig, authUserId, triggerCloudPullAndPush]);
 
   // Debounced diff-only background push on state edits when signed in
   const lastCloudPullMsRef = useRef<number>(0);
@@ -901,7 +933,10 @@ export function BookTrackerApp() {
               mergedBooks,
               localToday
             );
-            nextBooks = syncDismissedWorksWithBooks(cleanedBooks);
+            const syncedBooks = syncDismissedWorksWithBooks(cleanedBooks);
+            nextBooks = settingsRef.current.includeAuthorBacklist
+              ? syncedBooks
+              : pruneUnengagedAuthorBacklist(syncedBooks, localToday).books;
           }
 
           const authorsUnchanged =
@@ -939,6 +974,30 @@ export function BookTrackerApp() {
       cloudConfig,
       authUserId,
       (payload) => {
+        if (typeof payload.includeAuthorBacklist === 'boolean') {
+          const nextBacklist = payload.includeAuthorBacklist;
+          setSettings((prev) => {
+            if (Boolean(prev.includeAuthorBacklist) === nextBacklist) {
+              return prev;
+            }
+            const next = { ...prev, includeAuthorBacklist: nextBacklist };
+            settingsRef.current = next;
+            try {
+              localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+          if (!nextBacklist) {
+            const localToday = getLocalTodayStr();
+            setState((prev) => {
+              const { books: pruned, prunedIds } = pruneUnengagedAuthorBacklist(
+                prev.books,
+                localToday
+              );
+              return prunedIds.length > 0 ? { ...prev, books: pruned } : prev;
+            });
+          }
+        }
         applyBroadcastDeletions(payload);
         void runDeltaRefresh({
           explicitBookIds: payload.changedBookIds,
@@ -1048,6 +1107,10 @@ export function BookTrackerApp() {
         const nowIso = new Date().toISOString();
         const cloudCleanupIds: string[] = [];
 
+        const allowFullBacklist = Boolean(
+          settingsRef.current.includeAuthorBacklist
+        );
+
         setState((prev) => {
           const matchedExistingIds = new Set<string>();
           const nextBooksMap = new Map<string, BookItem>();
@@ -1092,6 +1155,25 @@ export function BookTrackerApp() {
                 );
               const nextHidden = Boolean(matched.hidden || isDismissedWork);
 
+              const candidateUpdated: BookItem = {
+                ...matched,
+                title: nextTitle,
+                authorId: nextAuthorId,
+                coverUrl: nextCover,
+                isbn: nextIsbn,
+                releaseDate: bestDate.releaseDate,
+                datePrecision: bestDate.datePrecision,
+                pageCount: nextPages,
+                hidden: nextHidden,
+              };
+              const nextTrackedFromUpcoming = computeTrackedFromUpcoming(
+                matched,
+                candidateUpdated,
+                localToday
+              )
+                ? true
+                : undefined;
+
               const didBookChange =
                 nextTitle !== matched.title ||
                 nextAuthorId !== matched.authorId ||
@@ -1100,31 +1182,34 @@ export function BookTrackerApp() {
                 bestDate.releaseDate !== matched.releaseDate ||
                 bestDate.datePrecision !== matched.datePrecision ||
                 nextPages !== matched.pageCount ||
-                nextHidden !== Boolean(matched.hidden);
+                nextHidden !== Boolean(matched.hidden) ||
+                Boolean(nextTrackedFromUpcoming) !==
+                  Boolean(matched.trackedFromUpcoming);
 
               if (didBookChange) {
                 nextBooksMap.set(matched.id, {
-                  ...matched,
-                  title: nextTitle,
-                  authorId: nextAuthorId,
-                  coverUrl: nextCover,
-                  isbn: nextIsbn,
-                  releaseDate: bestDate.releaseDate,
-                  datePrecision: bestDate.datePrecision,
-                  pageCount: nextPages,
-                  hidden: nextHidden,
+                  ...candidateUpdated,
+                  trackedFromUpcoming: nextTrackedFromUpcoming,
                   updatedAt: nowIso,
                 });
               }
             } else {
+              const incomingIsUpcoming =
+                classifyReleaseTiming(incoming, localToday) === 'upcoming';
+              if (!incomingIsUpcoming && !allowFullBacklist) {
+                continue;
+              }
               const isDismissedWork = dismissedWorkKeysRef.current.has(
                 normBookMatchKey(incoming.title, incoming.authorName)
               );
+              const nextHidden = Boolean(incoming.hidden || isDismissedWork);
               const { description: _unusedDesc, ...slimIncoming } = incoming;
               nextBooksMap.set(incoming.id, {
                 ...slimIncoming,
                 authorId: author.id,
-                hidden: Boolean(incoming.hidden || isDismissedWork),
+                hidden: nextHidden,
+                trackedFromUpcoming:
+                  incomingIsUpcoming && !nextHidden ? true : undefined,
                 updatedAt: nowIso,
               });
             }
@@ -1141,6 +1226,7 @@ export function BookTrackerApp() {
                 !b.hidden &&
                 !b.isManual &&
                 !b.isOneOff &&
+                !b.trackedFromUpcoming &&
                 !b.rating &&
                 !b.notes &&
                 !b.vellumBookId;
@@ -1156,8 +1242,11 @@ export function BookTrackerApp() {
               Array.from(nextBooksMap.values()),
               localToday
             );
-          if (removedIds.length > 0) {
-            cloudCleanupIds.push(...removedIds);
+          const { books: scopedBooks, prunedIds } = allowFullBacklist
+            ? { books: consolidatedBooks, prunedIds: [] as string[] }
+            : pruneUnengagedAuthorBacklist(consolidatedBooks, localToday);
+          if (removedIds.length > 0 || prunedIds.length > 0) {
+            cloudCleanupIds.push(...removedIds, ...prunedIds);
           }
 
           const updatedAuthors = prev.authors.map((a) =>
@@ -1169,7 +1258,7 @@ export function BookTrackerApp() {
           return {
             ...prev,
             authors: updatedAuthors,
-            books: consolidatedBooks,
+            books: scopedBooks,
           };
         });
 
@@ -1190,9 +1279,13 @@ export function BookTrackerApp() {
             (b) => classifyReleaseTiming(b, todayStr) === 'upcoming'
           ).length;
           showToast(
-            `Synced ${fetchedBooks.length} books for ${author.name}${
-              upcomingCount > 0 ? ` (${upcomingCount} upcoming)` : ''
-            }`
+            allowFullBacklist
+              ? `Synced ${fetchedBooks.length} books for ${author.name}${
+                  upcomingCount > 0 ? ` (${upcomingCount} upcoming)` : ''
+                }`
+              : upcomingCount > 0
+              ? `Synced ${author.name} (${upcomingCount} upcoming)`
+              : `Checked ${author.name} (no new upcoming releases)`
           );
         }
       } catch (err) {
@@ -1267,9 +1360,19 @@ export function BookTrackerApp() {
         }
         return 2;
       };
+      const allowFullBacklist = Boolean(
+        settingsRef.current.includeAuthorBacklist
+      );
       const candidates = stateRef.current.books
         .filter((b) => {
           if (!canAutoRepairBook(b)) return false;
+          if (
+            !allowFullBacklist &&
+            classifyReleaseTiming(b, localToday) === 'released' &&
+            !isCuratedReleasedBook(b)
+          ) {
+            return false;
+          }
           if (!b.releaseDate || b.datePrecision === 'unknown') return true;
           if (hasImpossibleFinishVsRelease(b)) return true;
           if (b.releaseDate >= '2024') return true;
@@ -1380,19 +1483,7 @@ export function BookTrackerApp() {
             const nextIsbn = b.isbn || m.isbn;
             const nextPages = b.pageCount || m.pageCount;
 
-            const didChange =
-              nextTitle !== b.title ||
-              bestDate.releaseDate !== b.releaseDate ||
-              bestDate.datePrecision !== b.datePrecision ||
-              nextCover !== b.coverUrl ||
-              nextIsbn !== b.isbn ||
-              nextPages !== b.pageCount;
-
-            if (!didChange) return b;
-            changedInBatch = true;
-            updatedCount += 1;
-
-            return {
+            const candidateUpdated: BookItem = {
               ...b,
               title: nextTitle,
               releaseDate: bestDate.releaseDate,
@@ -1400,6 +1491,32 @@ export function BookTrackerApp() {
               coverUrl: nextCover,
               isbn: nextIsbn,
               pageCount: nextPages,
+            };
+            const nextTrackedFromUpcoming = computeTrackedFromUpcoming(
+              b,
+              candidateUpdated,
+              localToday
+            )
+              ? true
+              : undefined;
+
+            const didChange =
+              nextTitle !== b.title ||
+              bestDate.releaseDate !== b.releaseDate ||
+              bestDate.datePrecision !== b.datePrecision ||
+              nextCover !== b.coverUrl ||
+              nextIsbn !== b.isbn ||
+              nextPages !== b.pageCount ||
+              Boolean(nextTrackedFromUpcoming) !==
+                Boolean(b.trackedFromUpcoming);
+
+            if (!didChange) return b;
+            changedInBatch = true;
+            updatedCount += 1;
+
+            return {
+              ...candidateUpdated,
+              trackedFromUpcoming: nextTrackedFromUpcoming,
               updatedAt: nowIso,
             };
           });
@@ -1410,13 +1527,17 @@ export function BookTrackerApp() {
             nextBooks,
             localToday
           );
-          if (removedIds.length > 0) {
-            removedBatchIds.push(...removedIds);
+          const { books: scoped, prunedIds } = settingsRef.current
+            .includeAuthorBacklist
+            ? { books: consolidated, prunedIds: [] as string[] }
+            : pruneUnengagedAuthorBacklist(consolidated, localToday);
+          if (removedIds.length > 0 || prunedIds.length > 0) {
+            removedBatchIds.push(...removedIds, ...prunedIds);
           }
 
           return {
             ...prev,
-            books: consolidated,
+            books: scoped,
           };
         });
 
@@ -2081,6 +2202,7 @@ export function BookTrackerApp() {
         ...b,
         hidden: true,
         isOneOff: false,
+        trackedFromUpcoming: undefined,
         readingStatus: b.readingStatus === 'todo' ? 'none' : b.readingStatus,
         addedToTodoAt: b.readingStatus === 'todo' ? undefined : b.addedToTodoAt,
         updatedAt: nowIso,
@@ -2298,13 +2420,56 @@ export function BookTrackerApp() {
 
   const handleSaveSettings = useCallback(
     (next: AppSettings) => {
+      const prevBacklist = Boolean(settingsRef.current.includeAuthorBacklist);
+      const nextBacklist = Boolean(next.includeAuthorBacklist);
+      settingsRef.current = next;
       setSettings(next);
       try {
         localStorage.setItem(LOCAL_SETTINGS_KEY, JSON.stringify(next));
       } catch {}
+
+      if (prevBacklist !== nextBacklist) {
+        const prefPromise =
+          cloudConfig && authUserId
+            ? syncCloudSettingsPreference(cloudConfig, authUserId, {
+                includeAuthorBacklist: nextBacklist,
+              }).catch(() => {})
+            : Promise.resolve();
+
+        if (!nextBacklist) {
+          const localToday = getLocalTodayStr();
+          const { books: prunedBooks, prunedIds } =
+            pruneUnengagedAuthorBacklist(stateRef.current.books, localToday);
+          if (prunedIds.length > 0) {
+            deletedBookIdsRef.current.push(...prunedIds);
+            setState((prev) => ({ ...prev, books: prunedBooks }));
+            if (cloudConfig && authUserId) {
+              deleteCloudRecords(
+                cloudConfig,
+                authUserId,
+                'tracked_books',
+                prunedIds
+              ).catch(() => {});
+            }
+          }
+          showToast('Released set to Upcoming + Goodreads & manual books');
+          return;
+        } else {
+          showToast(
+            stateRef.current.authors.length > 0
+              ? 'Full author backlists enabled — syncing authors…'
+              : 'Full author backlists enabled'
+          );
+          if (stateRef.current.authors.length > 0) {
+            void prefPromise.then(() => handleSyncAllAuthors());
+          }
+          return;
+        }
+      }
+
       showToast('Settings saved');
     },
-    [showToast]
+    [cloudConfig, authUserId, handleSyncAllAuthors, showToast]
   );
 
   const handleApplyBatchImport = useCallback(
@@ -2433,10 +2598,13 @@ export function BookTrackerApp() {
           Array.from(booksMap.values()),
           todayStr
         );
+        const scopedImportBooks = settingsRef.current.includeAuthorBacklist
+          ? deduplicatedImportBooks
+          : pruneUnengagedAuthorBacklist(deduplicatedImportBooks, todayStr).books;
 
         return {
           authors: nextAuthors,
-          books: deduplicatedImportBooks,
+          books: scopedImportBooks,
           challenges: nextChallenges,
         };
       });
@@ -2480,9 +2648,13 @@ export function BookTrackerApp() {
   const releasedBooks = useMemo(
     () =>
       visibleBooks.filter(
-        (b) => classifyReleaseTiming(b, todayStr) === 'released'
+        (b) =>
+          classifyReleaseTiming(b, todayStr) === 'released' &&
+          (demoMode ||
+            Boolean(settings.includeAuthorBacklist) ||
+            isCuratedReleasedBook(b))
       ),
-    [visibleBooks, todayStr]
+    [visibleBooks, todayStr, demoMode, settings.includeAuthorBacklist]
   );
 
   const todoCount = useMemo(
@@ -2724,6 +2896,7 @@ export function BookTrackerApp() {
             books={releasedBooks}
             authors={state.authors}
             todayStr={todayStr}
+            includeAuthorBacklist={Boolean(settings.includeAuthorBacklist)}
             isSyncing={
               isSyncingAll || isRepairingLedger || syncingAuthorIds.size > 0
             }

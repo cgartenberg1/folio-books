@@ -96,7 +96,7 @@ export function BookCard({
 
   const isTodo = book.readingStatus === 'todo';
   const isRead = book.readingStatus === 'read';
-  const isRemovable = book.isOneOff || book.isManual;
+  const isRemovable = (book.isOneOff && !isAuthorFollowed) || book.isManual;
 
   const metaParts: React.ReactNode[] = [];
   if (!showDateBlock) {

@@ -29,6 +29,7 @@ export interface AuthSessionSnapshot {
   userId: string | null;
   email?: string;
   profile: UserProfile | null;
+  includeAuthorBacklist?: boolean;
 }
 
 function normalizeSupabaseProjectUrl(raw?: string): string {
@@ -148,6 +149,11 @@ export async function ensureAndFetchUserProfile(
   };
 }
 
+function extractBacklistPref(user: User): boolean | undefined {
+  const raw = user.user_metadata?.include_author_backlist;
+  return typeof raw === 'boolean' ? raw : undefined;
+}
+
 export async function getCurrentSessionAndProfile(
   config: CloudConnectionConfig
 ): Promise<AuthSessionSnapshot> {
@@ -166,6 +172,7 @@ export async function getCurrentSessionAndProfile(
     userId: session.user.id,
     email: session.user.email,
     profile,
+    includeAuthorBacklist: extractBacklistPref(session.user),
   };
 }
 
@@ -183,12 +190,14 @@ export function subscribeToAuthChanges(
         onChange({ userId: null, profile: null });
         return;
       }
+      const includeAuthorBacklist = extractBacklistPref(session.user);
       try {
         const profile = await ensureAndFetchUserProfile(config, session.user);
         onChange({
           userId: session.user.id,
           email: session.user.email,
           profile,
+          includeAuthorBacklist,
         });
       } catch {
         onChange({
@@ -200,6 +209,7 @@ export function subscribeToAuthChanges(
             displayName: defaultDisplayNameFromUser(session.user),
             shareActivity: true,
           },
+          includeAuthorBacklist,
         });
       }
     }, 0);
@@ -399,6 +409,17 @@ export function resetCloudSyncFingerprints(userId?: string): void {
   }
 }
 
+const UPCOMING_GRADUATED_FORMAT_MARKER = 'folio:upcoming';
+
+function resolvePersistedVellumFormat(b: BookItem): string {
+  if (b.vellumBookId) {
+    return b.vellumFormat ?? '';
+  }
+  return b.trackedFromUpcoming && !b.hidden
+    ? UPCOMING_GRADUATED_FORMAT_MARKER
+    : '';
+}
+
 function fingerprintBook(b: BookItem): string {
   const isManualCol = Boolean(
     b.userEdited || (b.isManual && b.id.startsWith('manual:book:'))
@@ -426,7 +447,7 @@ function fingerprintBook(b: BookItem): string {
     typeof b.vellumProgress === 'number' ? b.vellumProgress : '',
     b.vellumChapter ?? '',
     b.vellumLastReadAt ?? '',
-    b.vellumFormat ?? '',
+    resolvePersistedVellumFormat(b),
     b.updatedAt,
   ].join('\x1f');
 }
@@ -483,6 +504,7 @@ export interface CloudSyncBroadcastPayload {
   deletedBookIds?: string[];
   deletedAuthorIds?: string[];
   deletedChallengeIds?: string[];
+  includeAuthorBacklist?: boolean;
 }
 
 interface ManagedBroadcastEntry {
@@ -578,6 +600,24 @@ function broadcastCloudMutation(
       })
       .catch(() => {});
   } catch {}
+}
+
+export async function syncCloudSettingsPreference(
+  config: CloudConnectionConfig,
+  userId: string,
+  prefs: { includeAuthorBacklist: boolean }
+): Promise<void> {
+  const supabase = getSupabaseClient(config);
+  await supabase.auth
+    .updateUser({
+      data: {
+        include_author_backlist: Boolean(prefs.includeAuthorBacklist),
+      },
+    })
+    .catch(() => {});
+  broadcastCloudMutation(config, userId, {
+    includeAuthorBacklist: Boolean(prefs.includeAuthorBacklist),
+  });
 }
 
 async function fetchAllPaginatedRows<TRow>(
@@ -689,6 +729,20 @@ function mapAuthorRow(row: Record<string, any>): FollowedAuthor {
 }
 
 function mapBookRow(row: Record<string, any>): BookItem {
+  const rawVellumFmt =
+    typeof row.vellum_format === 'string' ? row.vellum_format : undefined;
+  const isHidden = Boolean(row.hidden);
+  const trackedFromUpcoming =
+    !isHidden &&
+    (Boolean(row.tracked_from_upcoming) ||
+      rawVellumFmt === UPCOMING_GRADUATED_FORMAT_MARKER)
+      ? true
+      : undefined;
+  const vellumFormat =
+    rawVellumFmt === UPCOMING_GRADUATED_FORMAT_MARKER
+      ? undefined
+      : rawVellumFmt;
+
   return {
     id: row.id,
     source: row.source as DataSource,
@@ -709,7 +763,8 @@ function mapBookRow(row: Record<string, any>): BookItem {
       !String(row.id || '').startsWith('manual:batch:')
         ? true
         : undefined,
-    hidden: Boolean(row.hidden),
+    trackedFromUpcoming,
+    hidden: isHidden,
     readingStatus: (row.reading_status || 'none') as ReadingStatus,
     addedToTodoAt: row.added_to_todo_at ?? undefined,
     finishedAt: row.finished_at ?? undefined,
@@ -720,7 +775,7 @@ function mapBookRow(row: Record<string, any>): BookItem {
       typeof row.vellum_progress === 'number' ? row.vellum_progress : undefined,
     vellumChapter: row.vellum_chapter ?? undefined,
     vellumLastReadAt: row.vellum_last_read_at ?? undefined,
-    vellumFormat: row.vellum_format ?? undefined,
+    vellumFormat,
     updatedAt: row.updated_at,
   };
 }
@@ -1009,12 +1064,13 @@ export async function upsertCloudBooks(
           updated_at: b.updatedAt,
         };
         if (includeVellum) {
+          const persistedFormat = resolvePersistedVellumFormat(b);
           base.vellum_book_id = b.vellumBookId ?? null;
           base.vellum_progress =
             typeof b.vellumProgress === 'number' ? b.vellumProgress : null;
           base.vellum_chapter = b.vellumChapter ?? null;
           base.vellum_last_read_at = b.vellumLastReadAt ?? null;
-          base.vellum_format = b.vellumFormat ?? null;
+          base.vellum_format = persistedFormat || null;
         }
         return base;
       });
@@ -1223,6 +1279,7 @@ export function mergeLocalAndCloudState(
               b.isOneOff ||
                 b.isManual ||
                 b.userEdited ||
+                b.trackedFromUpcoming ||
                 b.hidden ||
                 b.rating ||
                 b.notes ||

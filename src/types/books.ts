@@ -43,6 +43,8 @@ export interface BookItem {
   isManual: boolean;
   /** True when the user explicitly edited bibliographic fields (title/author/releaseDate) in Folio */
   userEdited?: boolean;
+  /** True when this book was tracked on the Upcoming calendar (unhidden) so it graduates to Released upon publication */
+  trackedFromUpcoming?: boolean;
   /** Dismissed/hidden from feed so sync doesn't re-add unwanted editions */
   hidden?: boolean;
   readingStatus: ReadingStatus;
@@ -102,6 +104,8 @@ export interface AppSettings {
   supabaseAnonKey: string;
   workspaceKey?: string;
   vellumUrl?: string;
+  /** When true, pull and display followed authors' entire past back-catalogs in Released (defaults to false) */
+  includeAuthorBacklist?: boolean;
 }
 
 export interface TrackerState {

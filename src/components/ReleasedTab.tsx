@@ -18,6 +18,7 @@ interface ReleasedTabProps {
   books: BookItem[];
   authors: FollowedAuthor[];
   todayStr: string;
+  includeAuthorBacklist?: boolean;
   isSyncing?: boolean;
   onSyncAllAuthors?: () => void;
   selectedAuthorIdFilter: string | null;
@@ -38,6 +39,7 @@ export function ReleasedTab({
   books,
   authors,
   todayStr,
+  includeAuthorBacklist = false,
   isSyncing = false,
   onSyncAllAuthors,
   selectedAuthorIdFilter,
@@ -130,7 +132,9 @@ export function ReleasedTab({
         title="Released"
         dek={
           books.length === 0
-            ? 'Every book already in the world, newest first.'
+            ? includeAuthorBacklist
+              ? 'Every book already in the world, newest first.'
+              : 'Books from your Upcoming calendar once released, alongside Goodreads imports and titles you added.'
             : `${countWord(books.length, true)} published ${plural(
                 books.length,
                 'title'
@@ -224,7 +228,9 @@ export function ReleasedTab({
           }
           body={
             books.length === 0
-              ? 'Follow an author or look up a single title, and their published work will gather here, newest first.'
+              ? includeAuthorBacklist
+                ? 'Follow an author or look up a single title, and their published work will gather here, newest first.'
+                : 'Forthcoming books on your Upcoming calendar appear here once published, along with Goodreads imports and manually added titles. You can enable full author backlists anytime in Settings.'
               : 'Try another heading, or clear the search.'
           }
         >

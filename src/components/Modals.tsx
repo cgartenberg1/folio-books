@@ -1092,7 +1092,14 @@ export function SettingsModal({
   const [supabaseUrl, setSupabaseUrl] = useState(settings.supabaseUrl);
   const [supabaseAnonKey, setSupabaseAnonKey] = useState(settings.supabaseAnonKey);
   const [vellumUrl, setVellumUrl] = useState(settings.vellumUrl || 'http://localhost:3030');
+  const [includeAuthorBacklist, setIncludeAuthorBacklist] = useState(
+    Boolean(settings.includeAuthorBacklist)
+  );
   const [savedNotice, setSavedNotice] = useState(false);
+
+  useEffect(() => {
+    setIncludeAuthorBacklist(Boolean(settings.includeAuthorBacklist));
+  }, [settings.includeAuthorBacklist]);
 
   const [folioOrigin, setFolioOrigin] = useState('http://localhost:3000');
   const [bridgeToken, setBridgeToken] = useState<string>('');
@@ -1161,6 +1168,17 @@ export function SettingsModal({
     }
   };
 
+  const handleToggleBacklist = (checked: boolean) => {
+    setIncludeAuthorBacklist(checked);
+    onSaveSettings({
+      hardcoverToken: hardcoverToken.trim(),
+      supabaseUrl: supabaseUrl.trim(),
+      supabaseAnonKey: supabaseAnonKey.trim(),
+      vellumUrl: vellumUrl.trim() || 'http://localhost:3030',
+      includeAuthorBacklist: checked,
+    });
+  };
+
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSaveSettings({
@@ -1168,6 +1186,7 @@ export function SettingsModal({
       supabaseUrl: supabaseUrl.trim(),
       supabaseAnonKey: supabaseAnonKey.trim(),
       vellumUrl: vellumUrl.trim() || 'http://localhost:3030',
+      includeAuthorBacklist,
     });
     setSavedNotice(true);
     setTimeout(() => setSavedNotice(false), 2000);
@@ -1220,6 +1239,38 @@ export function SettingsModal({
       onClose={onClose}
     >
       <form onSubmit={handleSave} className="space-y-5">
+        {/* Released Ledger Scope */}
+        <div className="panel space-y-3 p-4 sm:p-5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <BookOpen strokeWidth={1.5} className="h-4 w-4 text-claret" />
+              <h3 className="caps text-ink">
+                Released Ledger Scope
+              </h3>
+            </div>
+            <span className={includeAuthorBacklist ? 'tag' : 'tag tag-moss'}>
+              {includeAuthorBacklist
+                ? 'Full author backlists'
+                : 'Curated · Upcoming + Goodreads'}
+            </span>
+          </div>
+
+          <label className="flex cursor-pointer items-start gap-3 border border-rule bg-paper p-3.5 transition-colors hover:border-ink-muted">
+            <input
+              type="checkbox"
+              checked={includeAuthorBacklist}
+              onChange={(e) => handleToggleBacklist(e.target.checked)}
+              className="mt-1 h-4 w-4 shrink-0 border-rule-strong accent-[rgb(var(--claret))]"
+            />
+            <span className="font-serif text-[14.5px] leading-snug text-ink-soft">
+              <strong className="block font-sans text-[12.5px] font-medium text-ink">
+                Include full author backlists in Released
+              </strong>
+              When unchecked (default), Released only shows books that graduated from your Upcoming calendar without being hidden, your Goodreads imports, and titles you added or tracked yourself. Check this if you want to pull every historical past book written by your followed authors.
+            </span>
+          </label>
+        </div>
+
         {/* Hardcover Section */}
         <div className="panel space-y-3 p-4 sm:p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1391,6 +1442,8 @@ export function SettingsModal({
                         hardcoverToken: hardcoverToken.trim(),
                         supabaseUrl: supabaseUrl.trim(),
                         supabaseAnonKey: supabaseAnonKey.trim(),
+                        vellumUrl: vellumUrl.trim() || 'http://localhost:3030',
+                        includeAuthorBacklist,
                       });
                       onClose();
                       onGoToFriendsSignIn();

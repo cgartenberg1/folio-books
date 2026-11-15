@@ -1,4 +1,5 @@
 import { pickPreferredCoverUrl } from '@/lib/coverArt';
+import { classifyReleaseTiming } from '@/lib/dates';
 import { BookItem, DatePrecision, ReadingStatus } from '@/types/books';
 
 /**
@@ -937,18 +938,17 @@ export function mergeCanonicalBookPair(
     ),
     releaseDate: bestDate.releaseDate,
     datePrecision: bestDate.datePrecision,
-    description:
-      (primary.description?.length || 0) >= (secondary.description?.length || 0)
-        ? primary.description || secondary.description
-        : secondary.description,
+    description: undefined,
     pageCount: primary.pageCount || secondary.pageCount,
     isbn: primary.isbn || secondary.isbn,
-    isOneOff:
-      primary.authorId || secondary.authorId
-        ? false
-        : Boolean(primary.isOneOff || secondary.isOneOff),
+    isOneOff: Boolean(primary.isOneOff || secondary.isOneOff),
     isManual: Boolean(primary.isManual && secondary.isManual),
     userEdited: Boolean(primary.userEdited || secondary.userEdited) || undefined,
+    trackedFromUpcoming:
+      !mergedHidden &&
+      Boolean(primary.trackedFromUpcoming || secondary.trackedFromUpcoming)
+        ? true
+        : undefined,
     hidden: mergedHidden,
     readingStatus: bestStatus,
     addedToTodoAt:
@@ -973,6 +973,114 @@ export function mergeCanonicalBookPair(
       velPrimary.vellumLastReadAt || a.vellumLastReadAt || b.vellumLastReadAt,
     vellumFormat: velPrimary.vellumFormat || a.vellumFormat || b.vellumFormat,
     updatedAt,
+  };
+}
+
+/**
+ * Returns true if a published book belongs in the user's curated Released ledger:
+ * - Graduated from the Upcoming calendar without being hidden (`trackedFromUpcoming`)
+ * - Imported from Goodreads or marked Want to Read / Read (`readingStatus !== 'none'`, `gr:book:*`)
+ * - Added/edited by hand, tracked as a single title, or opened in Vellum
+ */
+export function isCuratedReleasedBook(book: BookItem): boolean {
+  if (book.hidden) return false;
+  if (book.trackedFromUpcoming) return true;
+  if (book.readingStatus === 'read' || book.readingStatus === 'todo') {
+    return true;
+  }
+  if (book.isManual || book.userEdited || book.isOneOff) {
+    return true;
+  }
+  if (
+    book.id.startsWith('manual:') ||
+    book.id.startsWith('gr:book:') ||
+    book.id.startsWith('vellum:')
+  ) {
+    return true;
+  }
+  if (
+    Boolean(book.finishedAt) ||
+    typeof book.rating === 'number' ||
+    Boolean(book.notes) ||
+    Boolean(book.vellumBookId)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Computes whether a book should carry `trackedFromUpcoming`:
+ * - Every non-hidden Upcoming book gets `true` so it automatically graduates to Released when its street date arrives.
+ * - Already-graduated books keep `true` permanently unless hidden, EXCEPT when an unengaged book had a false
+ *   future reissue date that a catalog repair corrected >90 days into the past.
+ */
+export function computeTrackedFromUpcoming(
+  prevBook: BookItem | undefined,
+  nextBook: BookItem,
+  todayStr: string
+): boolean {
+  if (nextBook.hidden) return false;
+
+  const nextTiming = classifyReleaseTiming(nextBook, todayStr);
+  if (nextTiming === 'upcoming') {
+    return true;
+  }
+
+  if (!prevBook?.trackedFromUpcoming) {
+    return false;
+  }
+
+  const prevWasUpcoming = classifyReleaseTiming(prevBook, todayStr) === 'upcoming';
+  const unengagedCatalogItem =
+    nextBook.readingStatus === 'none' &&
+    !nextBook.isOneOff &&
+    !nextBook.isManual &&
+    !nextBook.userEdited;
+
+  if (prevWasUpcoming && unengagedCatalogItem && nextBook.releaseDate) {
+    const nextSort = normalizedSortableDate(
+      nextBook.releaseDate,
+      nextBook.datePrecision
+    );
+    const todaySort = normalizedSortableDate(todayStr, 'day');
+    if (nextSort && todaySort && nextSort < todaySort) {
+      const ageDays = daysBetweenSortableDates(nextSort, todaySort);
+      if (ageDays > 90) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Removes unengaged, non-hidden historical author backlist rows when the user's
+ * Released ledger is set to curated mode (`!includeAuthorBacklist`).
+ */
+export function pruneUnengagedAuthorBacklist(
+  books: BookItem[],
+  todayStr: string
+): { books: BookItem[]; prunedIds: string[] } {
+  const kept: BookItem[] = [];
+  const prunedIds: string[] = [];
+
+  for (const b of books) {
+    if (
+      b.hidden ||
+      classifyReleaseTiming(b, todayStr) === 'upcoming' ||
+      isCuratedReleasedBook(b)
+    ) {
+      kept.push(b);
+    } else {
+      prunedIds.push(b.id);
+    }
+  }
+
+  return {
+    books: prunedIds.length > 0 ? kept : books,
+    prunedIds,
   };
 }
 
@@ -1034,10 +1142,20 @@ export function consolidateDuplicateBooks(
     }
 
     const { description: _unusedDesc, ...slimRaw } = rawItem;
-    const item: BookItem = {
+    const baseItem: BookItem = {
       ...slimRaw,
       ...sanitizedDate,
       title: protectedManual ? rawItem.title : cleanDisplayBookTitle(rawItem.title),
+    };
+    const item: BookItem = {
+      ...baseItem,
+      trackedFromUpcoming: computeTrackedFromUpcoming(
+        rawItem,
+        baseItem,
+        todayStr
+      )
+        ? true
+        : undefined,
     };
 
     // Drop pure un-engaged multi-book box sets / summaries / foreign-edition noise
@@ -1051,6 +1169,7 @@ export function consolidateDuplicateBooks(
 
     if (
       isUnengagedCatalogItem &&
+      !item.hidden &&
       (isLikelyNoiseTitle(rawItem.title, true) ||
         (!isAlreadyReleased(item, todayStr) &&
           isStrictSecondaryReissueTitle(rawItem.title)))
@@ -1079,7 +1198,17 @@ export function consolidateDuplicateBooks(
 
     if (matchedIdx >= 0) {
       const existing = result[matchedIdx];
-      const merged = mergeCanonicalBookPair(existing, item, todayStr);
+      const mergedRaw = mergeCanonicalBookPair(existing, item, todayStr);
+      const merged: BookItem = {
+        ...mergedRaw,
+        trackedFromUpcoming: computeTrackedFromUpcoming(
+          existing.trackedFromUpcoming ? existing : item,
+          mergedRaw,
+          todayStr
+        )
+          ? true
+          : undefined,
+      };
       const droppedId = merged.id === existing.id ? item.id : existing.id;
       if (droppedId !== merged.id) {
         removedIds.push(droppedId);
