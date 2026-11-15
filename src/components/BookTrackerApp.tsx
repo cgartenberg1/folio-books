@@ -351,12 +351,33 @@ export function BookTrackerApp() {
       .then((info) => setServerStatus(info))
       .catch(() => {});
 
+    let swReg: ServiceWorkerRegistration | null = null;
+    const onSwVis = () => {
+      if (document.visibilityState === 'visible') {
+        const latestDay = getLocalTodayStr();
+        setTodayStr((prev) => (prev === latestDay ? prev : latestDay));
+        swReg?.update().catch(() => {});
+      }
+    };
+
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker
+        .register('/sw.js')
+        .then((reg) => {
+          swReg = reg;
+          reg.update().catch(() => {});
+        })
+        .catch(() => {});
     }
+    document.addEventListener('visibilitychange', onSwVis);
+    window.addEventListener('focus', onSwVis);
 
     setMounted(true);
-  }, []);
+    return () => {
+      document.removeEventListener('visibilitychange', onSwVis);
+      window.removeEventListener('focus', onSwVis);
+    };
+  }, [syncDismissedWorksWithBooks]);
 
   // Persist local state immediately on change (never in demo preview mode)
   useEffect(() => {
@@ -483,7 +504,11 @@ export function BookTrackerApp() {
   );
 
   const triggerCloudPullAndPush = useCallback(
-    async (activeSettings: AppSettings, explicitUserId?: string | null) => {
+    async (
+      activeSettings: AppSettings,
+      explicitUserId?: string | null,
+      options?: { replaceLocalCache?: boolean; showFeedback?: boolean }
+    ) => {
       const cfg = resolveCloudConfig(activeSettings);
       const targetUserId =
         explicitUserId !== undefined ? explicitUserId : authUserId;
@@ -505,20 +530,38 @@ export function BookTrackerApp() {
         } catch {}
 
         const localToday = getLocalTodayStr();
-        if (prevOwnerId && prevOwnerId !== targetUserId) {
-          // A different account signed in on this device; load their cloud library cleanly
+        setTodayStr((prev) => (prev === localToday ? prev : localToday));
+        const shouldReplaceLocal =
+          Boolean(options?.replaceLocalCache) ||
+          Boolean(prevOwnerId && prevOwnerId !== targetUserId);
+
+        let settledBooksCount = 0;
+
+        if (shouldReplaceLocal) {
+          // Different account or explicit "Reload from cloud": replace local cache cleanly
           dismissedWorkKeysRef.current = new Set();
           persistDismissedWorks();
           const { books: cleanedRemoteBooks, removedIds } =
             consolidateDuplicateBooks(remote.books, localToday);
-          const syncedRemoteBooks = syncDismissedWorksWithBooks(cleanedRemoteBooks);
+          const syncedRemoteBooks =
+            syncDismissedWorksWithBooks(cleanedRemoteBooks);
+          const keepIds = new Set(syncedRemoteBooks.map((b) => b.id));
+          const orphanRemoteIds = remote.books
+            .map((b) => b.id)
+            .filter((id) => !keepIds.has(id));
+          const allCleanupIds = Array.from(
+            new Set([...removedIds, ...orphanRemoteIds])
+          );
+
           setState({ ...remote, books: syncedRemoteBooks });
-          if (removedIds.length > 0) {
+          settledBooksCount = syncedRemoteBooks.filter((b) => !b.hidden).length;
+
+          if (allCleanupIds.length > 0) {
             await deleteCloudRecords(
               cfg,
               targetUserId,
               'tracked_books',
-              removedIds
+              allCleanupIds
             ).catch(() => {});
             await pushFullStateToCloud(cfg, targetUserId, {
               ...remote,
@@ -526,19 +569,32 @@ export function BookTrackerApp() {
             });
           }
         } else {
-          // Same user or first-time upgrade from local browser state
-          const rawMerged = mergeLocalAndCloudState(stateRef.current, remote);
+          // Same user or first-time upgrade: drop unengaged local ghosts already pruned in cloud
+          const rawMerged = mergeLocalAndCloudState(stateRef.current, remote, {
+            preferCloudDeletions: prevOwnerId === targetUserId,
+          });
           const { books: cleanedMergedBooks, removedIds } =
             consolidateDuplicateBooks(rawMerged.books, localToday);
-          const syncedMergedBooks = syncDismissedWorksWithBooks(cleanedMergedBooks);
+          const syncedMergedBooks =
+            syncDismissedWorksWithBooks(cleanedMergedBooks);
           const merged = { ...rawMerged, books: syncedMergedBooks };
           setState(merged);
-          if (removedIds.length > 0) {
+          settledBooksCount = syncedMergedBooks.filter((b) => !b.hidden).length;
+
+          const keepIds = new Set(syncedMergedBooks.map((b) => b.id));
+          const orphanRemoteIds = remote.books
+            .map((b) => b.id)
+            .filter((id) => !keepIds.has(id));
+          const allCleanupIds = Array.from(
+            new Set([...removedIds, ...orphanRemoteIds])
+          );
+
+          if (allCleanupIds.length > 0) {
             await deleteCloudRecords(
               cfg,
               targetUserId,
               'tracked_books',
-              removedIds
+              allCleanupIds
             ).catch(() => {});
           }
           await pushFullStateToCloud(cfg, targetUserId, merged);
@@ -549,7 +605,16 @@ export function BookTrackerApp() {
         } catch {}
 
         initialCloudSyncDoneRef.current = true;
+        lastCloudPullMsRef.current = Date.now();
         setCloudSyncStatus('synced');
+
+        if (options?.showFeedback) {
+          showToast(
+            options.replaceLocalCache
+              ? `Reloaded ${settledBooksCount.toLocaleString()} titles from cloud`
+              : `Synced ${settledBooksCount.toLocaleString()} titles across cloud`
+          );
+        }
       } catch (err) {
         setCloudSyncStatus('error');
         setCloudSyncError(
@@ -557,7 +622,7 @@ export function BookTrackerApp() {
         );
       }
     },
-    [authUserId, persistDismissedWorks, syncDismissedWorksWithBooks]
+    [authUserId, persistDismissedWorks, syncDismissedWorksWithBooks, showToast]
   );
 
   // Subscribe to Supabase Auth state (Magic Link sign-in / session restore / sign-out)
@@ -662,14 +727,17 @@ export function BookTrackerApp() {
         return;
       }
       const now = Date.now();
-      if (now - lastCloudPullMsRef.current < 10_000) return;
+      if (now - lastCloudPullMsRef.current < 4_000) return;
       lastCloudPullMsRef.current = now;
 
       try {
         const remote = await pullCloudState(cloudConfig, authUserId);
         const localToday = getLocalTodayStr();
+        setTodayStr((prev) => (prev === localToday ? prev : localToday));
         setState((prev) => {
-          const rawMerged = mergeLocalAndCloudState(prev, remote);
+          const rawMerged = mergeLocalAndCloudState(prev, remote, {
+            preferCloudDeletions: true,
+          });
           const { books: cleanedBooks } = consolidateDuplicateBooks(
             rawMerged.books,
             localToday
@@ -1006,7 +1074,7 @@ export function BookTrackerApp() {
           if (prioDiff !== 0) return prioDiff;
           return (b.releaseDate || '').localeCompare(a.releaseDate || '');
         })
-        .slice(0, 300);
+        .slice(0, 800);
 
       if (candidates.length === 0) {
         return { updatedCount: 0, ok: true };
@@ -1168,7 +1236,7 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v6:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v7:${authUserId || 'local'}`;
     if (autoRepairInFlightKeyRef.current === repairKey) return;
     try {
       if (localStorage.getItem(repairKey) === '1') return;
@@ -1226,13 +1294,17 @@ export function BookTrackerApp() {
     isSyncingAllRef.current = true;
     setIsSyncingAll(true);
     try {
+      if (cloudConfig && authUserId) {
+        await triggerCloudPullAndPush(settingsRef.current, authUserId);
+      }
       await repairTrackedBookDatesAndReissues();
-      for (const author of state.authors) {
+      const currentAuthors = [...stateRef.current.authors];
+      for (const author of currentAuthors) {
         await syncAuthorCatalog(author, true, true);
       }
       showToast(
-        state.authors.length > 0
-          ? `Refreshed & deduplicated ${state.authors.length} authors + tracked dates`
+        currentAuthors.length > 0
+          ? `Refreshed & deduplicated ${currentAuthors.length} authors + tracked dates`
           : 'Refreshed tracked book release dates'
       );
     } finally {
@@ -1240,9 +1312,12 @@ export function BookTrackerApp() {
       setIsSyncingAll(false);
     }
   }, [
-    state.authors,
+    state.authors.length,
     state.books.length,
     isSyncingAll,
+    cloudConfig,
+    authUserId,
+    triggerCloudPullAndPush,
     syncAuthorCatalog,
     repairTrackedBookDatesAndReissues,
     showToast,
@@ -2306,6 +2381,17 @@ export function BookTrackerApp() {
                 <Upload strokeWidth={1.5} className="h-4 w-4" />
               </button>
 
+              {cloudConfig && !authUserId && !demoMode && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('friends')}
+                  title="Sign in to sync this device with your cloud library"
+                  className="btn btn-outline btn-sm mr-1 text-claret"
+                >
+                  Sign in
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(true)}
@@ -2633,7 +2719,15 @@ export function BookTrackerApp() {
           stateSnapshot={state}
           onClose={() => setSettingsModalOpen(false)}
           onSaveSettings={handleSaveSettings}
-          onTriggerCloudSync={() => triggerCloudPullAndPush(settings)}
+          onTriggerCloudSync={() =>
+            triggerCloudPullAndPush(settings, undefined, { showFeedback: true })
+          }
+          onResetLocalFromCloud={() =>
+            triggerCloudPullAndPush(settings, undefined, {
+              replaceLocalCache: true,
+              showFeedback: true,
+            })
+          }
           onGoToFriendsSignIn={() => setActiveTab('friends')}
           onImportState={(imported) => {
             setState(imported);

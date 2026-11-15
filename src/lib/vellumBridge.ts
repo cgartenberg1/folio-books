@@ -62,6 +62,26 @@ function toTimestamp(iso?: string): number {
   return Number.isNaN(ts) ? 0 : ts;
 }
 
+function scoreDeterministicId(item: BookItem): number {
+  const engaged =
+    item.readingStatus !== 'none' ||
+    Boolean(item.rating || item.notes || item.vellumBookId);
+  return (
+    (engaged ? 100 : 0) +
+    (item.id.startsWith('manual:book:') ? 40 : 0) +
+    (item.source === 'hardcover' ? 30 : item.source === 'google' ? 15 : 5) +
+    (!item.id.startsWith('vellum:') ? 10 : 0)
+  );
+}
+
+function pickDeterministicBookId(a: BookItem, b: BookItem): string {
+  if (a.id === b.id) return a.id;
+  const sA = scoreDeterministicId(a);
+  const sB = scoreDeterministicId(b);
+  if (sA !== sB) return sA > sB ? a.id : b.id;
+  return a.id <= b.id ? a.id : b.id;
+}
+
 export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
   const aTs = toTimestamp(a.updatedAt);
   const bTs = toTimestamp(b.updatedAt);
@@ -95,10 +115,19 @@ export function mergeBookPair(a: BookItem, b: BookItem): BookItem {
     ? Boolean(a.hidden || b.hidden)
     : Boolean(primary.hidden && (primary.readingStatus !== 'none' || secondary.readingStatus === 'none'));
 
+  const winnerId = pickDeterministicBookId(a, b);
+  const winnerSource = winnerId === b.id ? b.source : a.source;
+  const winnerExternalId =
+    winnerId === b.id
+      ? b.externalId || a.externalId
+      : a.externalId || b.externalId;
+
   return {
     ...secondary,
     ...primary,
-    id: a.id, // preserve stable original ID in Folio
+    id: winnerId,
+    source: winnerSource,
+    externalId: winnerExternalId,
     hidden: mergedHidden,
     title: isProtectedUserManualBook(primary)
       ? primary.title
@@ -162,8 +191,13 @@ export function mergeBookLists(base: BookItem[], incoming: BookItem[]): BookItem
 
     if (matchedId && byId.has(matchedId)) {
       const merged = mergeBookPair(byId.get(matchedId)!, inc);
-      byId.set(matchedId, merged);
-      if (merged.vellumBookId) vellumToId.set(merged.vellumBookId, matchedId);
+      if (merged.id !== matchedId) {
+        byId.delete(matchedId);
+      }
+      byId.set(merged.id, merged);
+      normToId.set(norm, merged.id);
+      normToId.set(normBookMatchKey(merged.title, merged.authorName), merged.id);
+      if (merged.vellumBookId) vellumToId.set(merged.vellumBookId, merged.id);
     } else {
       byId.set(inc.id, inc);
       normToId.set(norm, inc.id);

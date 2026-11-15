@@ -1,4 +1,4 @@
-const CACHE_NAME = 'folio-pwa-v1';
+const CACHE_NAME = 'folio-pwa-v2';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -26,8 +26,13 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.pathname.startsWith('/api/')) return;
 
+  const isNavigation = request.mode === 'navigate';
+  const fetchPromise = isNavigation
+    ? fetch(request, { cache: 'no-cache' })
+    : fetch(request);
+
   event.respondWith(
-    fetch(request)
+    fetchPromise
       .then((response) => {
         if (
           response &&

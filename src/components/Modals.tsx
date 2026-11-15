@@ -1065,6 +1065,7 @@ interface SettingsModalProps {
   onClose: () => void;
   onSaveSettings: (next: AppSettings) => void;
   onTriggerCloudSync: () => void;
+  onResetLocalFromCloud?: () => void;
   onGoToFriendsSignIn: () => void;
   onImportState: (imported: TrackerState) => void;
 }
@@ -1083,6 +1084,7 @@ export function SettingsModal({
   onClose,
   onSaveSettings,
   onTriggerCloudSync,
+  onResetLocalFromCloud,
   onGoToFriendsSignIn,
   onImportState,
 }: SettingsModalProps) {
@@ -1326,29 +1328,61 @@ export function SettingsModal({
           )}
 
           {supabaseActive && (
-            <div className="flex flex-wrap items-center justify-between gap-2 border border-rule bg-paper px-3.5 py-2.5">
+            <div className="space-y-2.5 border border-rule bg-paper px-3.5 py-3">
               {authEmail || userDisplayName ? (
                 <>
-                  <div className="font-serif text-[14px] text-ink-soft">
-                    Signed in as{' '}
-                    <strong className="font-medium text-ink">
-                      {userDisplayName || authEmail}
-                    </strong>
-                    {authEmail && userDisplayName ? ` (${authEmail})` : ''}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-serif text-[14px] text-ink-soft">
+                      Signed in as{' '}
+                      <strong className="font-medium text-ink">
+                        {userDisplayName || authEmail}
+                      </strong>
+                      {authEmail && userDisplayName ? ` (${authEmail})` : ''}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={cloudSyncStatus === 'syncing'}
+                        onClick={onTriggerCloudSync}
+                        className="btn btn-outline btn-sm"
+                      >
+                        <RefreshCw
+                          strokeWidth={1.5}
+                          className={`h-3.5 w-3.5 ${
+                            cloudSyncStatus === 'syncing' ? 'animate-spin' : ''
+                          }`}
+                        />
+                        {cloudSyncStatus === 'syncing' ? 'Syncing…' : 'Sync now'}
+                      </button>
+                      {onResetLocalFromCloud && (
+                        <button
+                          type="button"
+                          disabled={cloudSyncStatus === 'syncing'}
+                          onClick={onResetLocalFromCloud}
+                          title="Replace this device's local cache with a fresh copy from Supabase"
+                          className="btn btn-ghost btn-sm"
+                        >
+                          Reload from cloud
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={onTriggerCloudSync}
-                    className="btn btn-outline btn-sm"
-                  >
-                    <RefreshCw strokeWidth={1.5} className="h-3.5 w-3.5" />
-                    Sync now
-                  </button>
+                  <p className="caps-sm text-ink-faint nums-lining">
+                    {stateSnapshot.books
+                      .filter((b) => !b.hidden)
+                      .length.toLocaleString()}{' '}
+                    visible titles (
+                    {stateSnapshot.books
+                      .filter((b) => Boolean(b.hidden))
+                      .length.toLocaleString()}{' '}
+                    hidden) · {stateSnapshot.authors.length.toLocaleString()}{' '}
+                    authors
+                  </p>
                 </>
               ) : (
-                <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-serif text-[14px] italic text-ink-muted">
-                    Supabase connected — sign in via Magic Link to sync &amp; join circles.
+                    Not signed in on this device — showing local browser storage only.
                   </span>
                   <button
                     type="button"
@@ -1365,7 +1399,7 @@ export function SettingsModal({
                   >
                     Sign in
                   </button>
-                </>
+                </div>
               )}
             </div>
           )}

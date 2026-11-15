@@ -844,9 +844,9 @@ export function mergeCanonicalBookPair(
     (item.coverUrl ? 5 : 0) +
     Math.min(20, Math.floor((users || 0) / 50));
 
-  const keepAIdentity =
-    scoreIdentity(a, aEngaged, meta?.aUsersCount) >=
-    scoreIdentity(b, bEngaged, meta?.bUsersCount);
+  const scoreA = scoreIdentity(a, aEngaged, meta?.aUsersCount);
+  const scoreB = scoreIdentity(b, bEngaged, meta?.bUsersCount);
+  const keepAIdentity = scoreA !== scoreB ? scoreA > scoreB : a.id <= b.id;
 
   const primary = keepAIdentity ? a : b;
   const secondary = keepAIdentity ? b : a;

@@ -353,24 +353,60 @@ export async function updateUserProfile(
   };
 }
 
+async function fetchAllPaginatedRows<TRow>(
+  buildPageQuery: (
+    from: number,
+    to: number
+  ) => PromiseLike<{ data: TRow[] | null; error: { message: string } | null }>
+): Promise<TRow[]> {
+  const pageSize = 1000;
+  const maxPages = 30;
+  const all: TRow[] = [];
+
+  for (let page = 0; page < maxPages; page++) {
+    const from = page * pageSize;
+    const to = from + pageSize - 1;
+    const { data, error } = await buildPageQuery(from, to);
+    if (error) throw new Error(error.message);
+    const rows = data || [];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+
+  return all;
+}
+
 export async function pullCloudState(
   config: CloudConnectionConfig,
   userId: string
 ): Promise<TrackerState> {
   const supabase = getSupabaseClient(config);
 
-  // Explicitly filter by user_id so friends' readable rows are not merged into personal state
-  const [authorsRes, booksRes, challengesRes] = await Promise.all([
-    supabase.from('followed_authors').select('*').eq('user_id', userId),
-    supabase.from('tracked_books').select('*').eq('user_id', userId),
+  // Paginate past PostgREST's 1,000-row default cap in deterministic primary-key order
+  // so large libraries (>1,000 tracked_books) sync 100% identically across every device.
+  const [authorRows, bookRows, challengesRes] = await Promise.all([
+    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('followed_authors')
+        .select('*')
+        .eq('user_id', userId)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
+    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('tracked_books')
+        .select('*')
+        .eq('user_id', userId)
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
     supabase.from('reading_challenges').select('*').eq('user_id', userId),
   ]);
 
-  if (authorsRes.error) throw new Error(authorsRes.error.message);
-  if (booksRes.error) throw new Error(booksRes.error.message);
   if (challengesRes.error) throw new Error(challengesRes.error.message);
 
-  const authors: FollowedAuthor[] = (authorsRes.data || []).map((row) => ({
+  const authors: FollowedAuthor[] = authorRows.map((row) => ({
     id: row.id,
     source: row.source as DataSource,
     externalId: row.external_id ?? undefined,
@@ -382,7 +418,7 @@ export async function pullCloudState(
     updatedAt: row.updated_at,
   }));
 
-  const books: BookItem[] = (booksRes.data || []).map((row) => ({
+  const books: BookItem[] = bookRows.map((row) => ({
     id: row.id,
     source: row.source as DataSource,
     externalId: row.external_id ?? undefined,
@@ -554,20 +590,62 @@ export async function deleteCloudRecords(
   table: 'followed_authors' | 'tracked_books' | 'reading_challenges',
   ids: string[]
 ): Promise<void> {
-  if (ids.length === 0) return;
+  const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+  if (uniqueIds.length === 0) return;
   const supabase = getSupabaseClient(config);
-  const { error } = await supabase
-    .from(table)
-    .delete()
-    .eq('user_id', userId)
-    .in('id', ids);
-  if (error) throw new Error(error.message);
+  const chunkSize = 75;
+
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const slice = uniqueIds.slice(i, i + chunkSize);
+    const { error } = await supabase
+      .from(table)
+      .delete()
+      .eq('user_id', userId)
+      .in('id', slice);
+    if (error) throw new Error(error.message);
+  }
 }
 
 export function mergeLocalAndCloudState(
   local: TrackerState,
-  cloud: TrackerState
+  cloud: TrackerState,
+  options?: { preferCloudDeletions?: boolean }
 ): TrackerState {
+  const preferCloudDeletions = Boolean(options?.preferCloudDeletions);
+  const recentGraceCutoffMs = Date.now() - 2 * 60 * 1000;
+
+  const cloudAuthorIds = new Set(cloud.authors.map((a) => a.id));
+  const filteredLocalAuthors =
+    preferCloudDeletions && cloud.authors.length > 0
+      ? local.authors.filter((a) => {
+          if (cloudAuthorIds.has(a.id)) return true;
+          const ts = Date.parse(a.updatedAt || a.followedAt || '') || 0;
+          return ts >= recentGraceCutoffMs;
+        })
+      : local.authors;
+
+  const cloudBookIds = new Set(cloud.books.map((b) => b.id));
+  const filteredLocalBooks =
+    preferCloudDeletions && cloud.books.length > 0
+      ? local.books.filter((b) => {
+          if (cloudBookIds.has(b.id)) return true;
+          const hasUserEngagement =
+            b.readingStatus !== 'none' ||
+            Boolean(
+              b.isOneOff ||
+                b.isManual ||
+                b.userEdited ||
+                b.hidden ||
+                b.rating ||
+                b.notes ||
+                b.vellumBookId
+            );
+          if (hasUserEngagement) return true;
+          const ts = Date.parse(b.updatedAt || '') || 0;
+          return ts >= recentGraceCutoffMs;
+        })
+      : local.books;
+
   const mergeById = <T extends { id: string; updatedAt: string }>(
     a: T[],
     b: T[]
@@ -584,8 +662,8 @@ export function mergeLocalAndCloudState(
   };
 
   return {
-    authors: mergeById(local.authors, cloud.authors),
-    books: mergeBookLists(local.books, cloud.books),
+    authors: mergeById(filteredLocalAuthors, cloud.authors),
+    books: mergeBookLists(filteredLocalBooks, cloud.books),
     challenges: mergeChallengeLists(local.challenges, cloud.challenges),
   };
 }
@@ -747,7 +825,7 @@ export async function fetchGroupFeedAndStandings(
     return { standings: [], feed: [] };
   }
 
-  const [profilesRes, challengesRes, booksRes] = await Promise.all([
+  const [profilesRes, challengesRes, allReadRows] = await Promise.all([
     supabase
       .from('profiles')
       .select('id, display_name, avatar_url, share_activity')
@@ -757,17 +835,21 @@ export async function fetchGroupFeedAndStandings(
       .select('*')
       .in('user_id', memberIds)
       .eq('year', year),
-    supabase
-      .from('tracked_books')
-      .select('*')
-      .in('user_id', memberIds)
-      .eq('reading_status', 'read')
-      .eq('hidden', false),
+    fetchAllPaginatedRows<Record<string, any>>((from, to) =>
+      supabase
+        .from('tracked_books')
+        .select('*')
+        .in('user_id', memberIds)
+        .eq('reading_status', 'read')
+        .eq('hidden', false)
+        .order('user_id', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to)
+    ),
   ]);
 
   if (profilesRes.error) throw new Error(profilesRes.error.message);
   if (challengesRes.error) throw new Error(challengesRes.error.message);
-  if (booksRes.error) throw new Error(booksRes.error.message);
 
   const profileById = new Map<
     string,
@@ -792,7 +874,6 @@ export async function fetchGroupFeedAndStandings(
     });
   }
 
-  const allReadRows = booksRes.data || [];
   const yearPrefix = `${year}`;
 
   // Build Yearly Reading Challenge Standings per group member
