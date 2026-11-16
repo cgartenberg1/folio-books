@@ -2684,11 +2684,6 @@ export function BookTrackerApp() {
     [visibleBooks, todayStr, demoMode, settings.includeAuthorBacklist]
   );
 
-  const todoCount = useMemo(
-    () => visibleBooks.filter((b) => b.readingStatus === 'todo').length,
-    [visibleBooks]
-  );
-
   const navItems: Array<{
     key: TabKey;
     label: string;
@@ -2714,7 +2709,6 @@ export function BookTrackerApp() {
       label: 'Reading',
       shortLabel: 'Reading',
       icon: BookCheck,
-      badge: todoCount || undefined,
     },
     {
       key: 'friends',
@@ -2727,7 +2721,6 @@ export function BookTrackerApp() {
       label: 'Authors',
       shortLabel: 'Authors',
       icon: Feather,
-      badge: state.authors.length || undefined,
     },
     {
       key: 'search',

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'folio-pwa-v7';
+const CACHE_NAME = 'folio-pwa-v8';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
