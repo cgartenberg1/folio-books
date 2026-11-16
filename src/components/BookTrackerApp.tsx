@@ -34,11 +34,14 @@ import {
   areSameCanonicalWork,
   computeTrackedFromUpcoming,
   consolidateDuplicateBooks,
+  encodeAuthorLatestRelease,
+  findMostRecentAuthorRelease,
   getCanonicalWorkKey,
   hasEditionDecorationInTitle,
   isCuratedReleasedBook,
   isProtectedUserManualBook,
   isStrictSecondaryReissueTitle,
+  normalizeAuthorCanonicalKey,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
   pruneUnengagedAuthorBacklist,
@@ -1249,11 +1252,35 @@ export function BookTrackerApp() {
             cloudCleanupIds.push(...removedIds, ...prunedIds);
           }
 
-          const updatedAuthors = prev.authors.map((a) =>
-            a.id === author.id
-              ? { ...a, lastSyncedAt: nowIso, updatedAt: nowIso }
-              : a
+          const authorNormKey = normalizeAuthorCanonicalKey(author.name);
+          const matchingLedgerBooks = scopedBooks.filter(
+            (b) =>
+              !b.hidden &&
+              (b.authorId === author.id ||
+                normalizeAuthorCanonicalKey(b.authorName) === authorNormKey)
           );
+          const latestRelease = findMostRecentAuthorRelease(
+            [...fetchedBooks, ...matchingLedgerBooks],
+            localToday
+          );
+
+          const updatedAuthors = prev.authors.map((a) => {
+            if (a.id !== author.id) return a;
+            const preserveManualBio =
+              a.source === 'manual' &&
+              Boolean(a.bio && !a.bio.startsWith('folio:latest:'));
+            const nextBio = preserveManualBio
+              ? a.bio
+              : latestRelease
+              ? encodeAuthorLatestRelease(latestRelease)
+              : undefined;
+            return {
+              ...a,
+              bio: nextBio,
+              lastSyncedAt: nowIso,
+              updatedAt: nowIso,
+            };
+          });
 
           return {
             ...prev,
@@ -1577,7 +1604,7 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v8:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v9:${authUserId || 'local'}`;
     if (autoRepairInFlightKeyRef.current === repairKey) return;
     try {
       if (localStorage.getItem(repairKey) === '1') return;
@@ -1673,7 +1700,7 @@ export function BookTrackerApp() {
         externalId: candidate.externalId,
         name: candidate.name,
         imageUrl: candidate.imageUrl,
-        bio: candidate.bio || candidate.topWork,
+        bio: candidate.bio || undefined,
         followedAt: nowIso,
         updatedAt: nowIso,
       };
@@ -2508,7 +2535,7 @@ export function BookTrackerApp() {
             externalId: cand.externalId,
             name: cand.name,
             imageUrl: cand.imageUrl,
-            bio: cand.bio || cand.topWork,
+            bio: cand.bio || undefined,
             followedAt: nowIso,
             updatedAt: nowIso,
           };

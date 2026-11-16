@@ -10,7 +10,13 @@ import {
   PageHeader,
   plural,
 } from '@/components/ui';
-import { classifyReleaseTiming } from '@/lib/dates';
+import {
+  decodeAuthorLatestRelease,
+  findMostRecentAuthorRelease,
+  normalizeAuthorCanonicalKey,
+  type AuthorLatestReleaseInfo,
+} from '@/lib/bookDedupe';
+import { classifyReleaseTiming, formatReleaseDate } from '@/lib/dates';
 import { BookItem, FollowedAuthor } from '@/types/books';
 
 interface AuthorsTabProps {
@@ -50,22 +56,56 @@ export function AuthorsTab({
   onViewAuthorReleased,
   onGoToSearch,
 }: AuthorsTabProps) {
-  const statsByAuthor = useMemo(() => {
-    const map = new Map<string, { upcoming: number; released: number }>();
+  const { statsByAuthor, latestReleaseByAuthor } = useMemo(() => {
+    const authorIdByNorm = new Map<string, string>();
+    for (const a of authors) {
+      const norm = normalizeAuthorCanonicalKey(a.name);
+      if (norm) authorIdByNorm.set(norm, a.id);
+    }
+
+    const statsMap = new Map<string, { upcoming: number; released: number }>();
+    const booksByAuthorId = new Map<string, BookItem[]>();
+
     for (const b of books) {
-      if (!b.authorId || b.hidden) continue;
-      if (!map.has(b.authorId)) {
-        map.set(b.authorId, { upcoming: 0, released: 0 });
+      if (b.hidden) continue;
+      const resolvedAuthorId =
+        b.authorId ||
+        authorIdByNorm.get(normalizeAuthorCanonicalKey(b.authorName));
+      if (!resolvedAuthorId) continue;
+
+      if (!statsMap.has(resolvedAuthorId)) {
+        statsMap.set(resolvedAuthorId, { upcoming: 0, released: 0 });
       }
-      const stat = map.get(b.authorId)!;
+      const stat = statsMap.get(resolvedAuthorId)!;
       if (classifyReleaseTiming(b, todayStr) === 'upcoming') {
         stat.upcoming += 1;
       } else {
         stat.released += 1;
       }
+
+      const list = booksByAuthorId.get(resolvedAuthorId) || [];
+      list.push(b);
+      booksByAuthorId.set(resolvedAuthorId, list);
     }
-    return map;
-  }, [books, todayStr]);
+
+    const latestMap = new Map<string, AuthorLatestReleaseInfo>();
+    for (const author of authors) {
+      const storedLatest = decodeAuthorLatestRelease(author.bio);
+      const ledgerBooks = booksByAuthorId.get(author.id) || [];
+      const combinedCandidates: Array<
+        Pick<BookItem, 'title' | 'releaseDate' | 'datePrecision' | 'hidden'>
+      > = [
+        ...(storedLatest ? [{ ...storedLatest, hidden: false }] : []),
+        ...ledgerBooks,
+      ];
+      const best = findMostRecentAuthorRelease(combinedCandidates, todayStr);
+      if (best) {
+        latestMap.set(author.id, best);
+      }
+    }
+
+    return { statsByAuthor: statsMap, latestReleaseByAuthor: latestMap };
+  }, [authors, books, todayStr]);
 
   const letterGroups = useMemo(() => {
     const sorted = [...authors].sort((a, b) =>
@@ -156,6 +196,13 @@ export function AuthorsTab({
                 {group.authors.map((author) => {
                   const counts = statsByAuthor.get(author.id) || { upcoming: 0, released: 0 };
                   const isSyncing = syncingAuthorIds.has(author.id);
+                  const latestRelease = latestReleaseByAuthor.get(author.id);
+                  const customManualBio =
+                    author.source === 'manual' &&
+                    author.bio &&
+                    !author.bio.startsWith('folio:latest:')
+                      ? author.bio
+                      : undefined;
 
                   return (
                     <article key={author.id} className="flex gap-4 border-b border-rule py-5">
@@ -188,11 +235,30 @@ export function AuthorsTab({
                           </button>
                         </p>
 
-                        {author.bio && (
-                          <p className="mt-1.5 text-[13px] leading-snug text-ink-muted line-clamp-2">
-                            {author.bio}
+                        {latestRelease ? (
+                          <p className="mt-1.5 truncate font-serif text-[14px] leading-snug text-ink-muted">
+                            <span className="caps-sm mr-1.5 text-ink-faint">
+                              Latest
+                            </span>
+                            <span className="italic text-ink-soft">
+                              {latestRelease.title}
+                            </span>
+                            {latestRelease.releaseDate && (
+                              <span className="ml-1.5 font-sans text-[11.5px] text-ink-faint nums-lining">
+                                ·{' '}
+                                {formatReleaseDate(
+                                  latestRelease.releaseDate,
+                                  latestRelease.datePrecision,
+                                  todayStr
+                                )}
+                              </span>
+                            )}
                           </p>
-                        )}
+                        ) : customManualBio ? (
+                          <p className="mt-1.5 text-[13px] leading-snug text-ink-muted line-clamp-2">
+                            {customManualBio}
+                          </p>
+                        ) : null}
 
                         <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
                           <button

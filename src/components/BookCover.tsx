@@ -305,7 +305,7 @@ export function AuthorAvatar({ name, imageUrl, size = 'md' }: AuthorAvatarProps)
           alt={name}
           loading="lazy"
           onError={() => setFailed(true)}
-          className="h-full w-full object-cover grayscale-[35%] sepia-[12%]"
+          className="h-full w-full object-cover grayscale contrast-[1.06]"
         />
       </div>
     );

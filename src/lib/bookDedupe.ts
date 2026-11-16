@@ -1077,6 +1077,125 @@ export function computeTrackedFromUpcoming(
   return true;
 }
 
+export interface AuthorLatestReleaseInfo {
+  title: string;
+  releaseDate?: string;
+  datePrecision: DatePrecision;
+}
+
+const LATEST_RELEASE_BIO_PREFIX = 'folio:latest:';
+
+export function encodeAuthorLatestRelease(
+  info: AuthorLatestReleaseInfo
+): string {
+  return `${LATEST_RELEASE_BIO_PREFIX}${info.releaseDate || ''}::${
+    info.datePrecision
+  }::${info.title}`;
+}
+
+export function decodeAuthorLatestRelease(
+  bio?: string
+): AuthorLatestReleaseInfo | null {
+  if (!bio || !bio.startsWith(LATEST_RELEASE_BIO_PREFIX)) return null;
+  const rest = bio.slice(LATEST_RELEASE_BIO_PREFIX.length);
+  const firstSep = rest.indexOf('::');
+  if (firstSep < 0) return null;
+  const secondSep = rest.indexOf('::', firstSep + 2);
+  if (secondSep < 0) return null;
+
+  const rawDate = rest.slice(0, firstSep).trim();
+  const rawPrecision = rest.slice(firstSep + 2, secondSep).trim();
+  const rawTitle = rest.slice(secondSep + 2).trim();
+  if (!rawTitle) return null;
+
+  const datePrecision: DatePrecision =
+    rawPrecision === 'day' ||
+    rawPrecision === 'month' ||
+    rawPrecision === 'year'
+      ? rawPrecision
+      : 'unknown';
+
+  return {
+    title: rawTitle,
+    releaseDate: rawDate || undefined,
+    datePrecision,
+  };
+}
+
+/**
+ * Picks an author's most recently published non-reissue English book as of `todayStr`.
+ */
+export function findMostRecentAuthorRelease(
+  books: Array<
+    Pick<BookItem, 'title' | 'releaseDate' | 'datePrecision' | 'hidden'>
+  >,
+  todayStr: string
+): AuthorLatestReleaseInfo | null {
+  const candidates = books.filter(
+    (b) =>
+      !b.hidden &&
+      Boolean(b.title?.trim()) &&
+      Boolean(b.releaseDate && b.datePrecision !== 'unknown') &&
+      classifyReleaseTiming(b, todayStr) === 'released' &&
+      !isLikelyNoiseTitle(b.title, true) &&
+      !isStrictSecondaryReissueTitle(b.title)
+  );
+
+  if (candidates.length === 0) return null;
+
+  const exactSortKey = (
+    b: Pick<BookItem, 'releaseDate' | 'datePrecision'>
+  ): string => {
+    const rd = b.releaseDate || '';
+    if (b.datePrecision === 'day' && /^\d{4}-\d{2}-\d{2}$/.test(rd)) return rd;
+    if (b.datePrecision === 'month' && /^\d{4}-\d{2}$/.test(rd)) {
+      return `${rd}-01`;
+    }
+    return `${rd.slice(0, 4)}-00-00`;
+  };
+
+  const precRank = (p: DatePrecision): number =>
+    p === 'day' ? 3 : p === 'month' ? 2 : p === 'year' ? 1 : 0;
+
+  let best = candidates[0];
+  for (let i = 1; i < candidates.length; i++) {
+    const cand = candidates[i];
+    const bestYear = Number((best.releaseDate || '').slice(0, 4)) || 0;
+    const candYear = Number((cand.releaseDate || '').slice(0, 4)) || 0;
+
+    if (candYear !== bestYear) {
+      if (candYear > bestYear) best = cand;
+      continue;
+    }
+
+    // Same publication year: prefer day/month precision over vague year-only stubs,
+    // then compare exact month/day descending.
+    const bestHasMonthOrDay = precRank(best.datePrecision) >= 2;
+    const candHasMonthOrDay = precRank(cand.datePrecision) >= 2;
+    if (candHasMonthOrDay !== bestHasMonthOrDay) {
+      if (candHasMonthOrDay) best = cand;
+      continue;
+    }
+
+    const bestKey = exactSortKey(best);
+    const candKey = exactSortKey(cand);
+    if (candKey > bestKey) {
+      best = cand;
+    } else if (
+      candKey === bestKey &&
+      precRank(cand.datePrecision) > precRank(best.datePrecision)
+    ) {
+      best = cand;
+    }
+  }
+
+  return {
+    title: cleanDisplayBookTitle(best.title),
+    releaseDate: best.releaseDate,
+    datePrecision: best.datePrecision,
+  };
+}
+
 /**
  * Removes unengaged, non-hidden historical author backlist rows when the user's
  * Released ledger is set to curated mode (`!includeAuthorBacklist`).

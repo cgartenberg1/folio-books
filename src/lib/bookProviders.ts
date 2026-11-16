@@ -786,16 +786,21 @@ export async function searchHardcoverCatalog(
   );
   const authors: SearchAuthorResult[] = authorDocs
     .filter((doc) => Boolean(doc.name && doc.id !== undefined))
-    .map((doc) => ({
-      id: `hc:author:${doc.id}`,
-      source: 'hardcover' as const,
-      externalId: String(doc.id),
-      name: doc.name!,
-      topWork: doc.books?.[0] || undefined,
-      booksCount:
-        typeof doc.books_count === 'number' ? doc.books_count : undefined,
-      imageUrl: doc.image?.url || undefined,
-    }));
+    .map((doc) => {
+      const cleanTop = (doc.books || [])
+        .map((t) => cleanDisplayBookTitle(t))
+        .find((t) => Boolean(t && !isLikelyNoiseEdition(t, true)));
+      return {
+        id: `hc:author:${doc.id}`,
+        source: 'hardcover' as const,
+        externalId: String(doc.id),
+        name: doc.name!,
+        topWork: cleanTop || undefined,
+        booksCount:
+          typeof doc.books_count === 'number' ? doc.books_count : undefined,
+        imageUrl: doc.image?.url || undefined,
+      };
+    });
 
   const bookDocs = extractSearchHits<HardcoverSearchBookDoc>(
     data.bookSearch?.results
