@@ -27,6 +27,37 @@ export const metadata: Metadata = {
   title: 'Folio · A Ledger of Books Forthcoming & Read',
   description:
     'Track upcoming book releases by week from authors you follow, browse released titles, manage your reading list, and keep a yearly reading challenge.',
+  manifest: '/manifest.webmanifest',
+  icons: {
+    icon: [
+      { url: '/icon.svg', type: 'image/svg+xml' },
+      {
+        url: '/icon-192.png',
+        sizes: '192x192',
+        type: 'image/png',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: '/icon-512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        media: '(prefers-color-scheme: light)',
+      },
+      {
+        url: '/icon-dark-192.png',
+        sizes: '192x192',
+        type: 'image/png',
+        media: '(prefers-color-scheme: dark)',
+      },
+      {
+        url: '/icon-dark-512.png',
+        sizes: '512x512',
+        type: 'image/png',
+        media: '(prefers-color-scheme: dark)',
+      },
+    ],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'default',

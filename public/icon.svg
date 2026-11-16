@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="512" height="512">
+  <defs>
+    <linearGradient id="bgLight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#9F2335"/>
+      <stop offset="100%" stop-color="#470D16"/>
+    </linearGradient>
+    <linearGradient id="bgDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2C292C"/>
+      <stop offset="100%" stop-color="#111012"/>
+    </linearGradient>
+    <linearGradient id="topCovLight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#DC354C"/>
+      <stop offset="100%" stop-color="#931628"/>
+    </linearGradient>
+    <linearGradient id="topCovDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#E3344C"/>
+      <stop offset="100%" stop-color="#961729"/>
+    </linearGradient>
+    <linearGradient id="midCovLight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EABF79"/>
+      <stop offset="100%" stop-color="#B9833E"/>
+    </linearGradient>
+    <linearGradient id="midCovDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#E1B269"/>
+      <stop offset="100%" stop-color="#A87432"/>
+    </linearGradient>
+    <linearGradient id="botCovDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#BE273D"/>
+      <stop offset="100%" stop-color="#771120"/>
+    </linearGradient>
+    <linearGradient id="pagesLight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FEFBF6"/>
+      <stop offset="100%" stop-color="#EFE5D7"/>
+    </linearGradient>
+    <linearGradient id="pagesDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#F5EEE2"/>
+      <stop offset="100%" stop-color="#D9CCB9"/>
+    </linearGradient>
+    <linearGradient id="ribLight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#D82B41"/>
+      <stop offset="100%" stop-color="#8D1324"/>
+    </linearGradient>
+    <linearGradient id="ribDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EB3048"/>
+      <stop offset="100%" stop-color="#9C1528"/>
+    </linearGradient>
+    <filter id="stackShadow" x="-12%" y="-10%" width="124%" height="128%">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#1E0408" flood-opacity="0.36"/>
+    </filter>
+    <style>
+      .bg { fill: url(#bgLight); }
+      .bot-cov { fill: #F6D0D6; fill-opacity: 0.56; stroke: #FFE8EC; stroke-opacity: 0.42; stroke-width: 3; }
+      .mid-cov { fill: url(#midCovLight); stroke: #FFE8BD; stroke-opacity: 0.45; stroke-width: 3; }
+      .top-cov { fill: url(#topCovLight); stroke: #FF8C9F; stroke-opacity: 0.45; stroke-width: 3; }
+      .pages { fill: url(#pagesLight); }
+      .rib { fill: url(#ribLight); stroke: #FF8A9D; stroke-opacity: 0.45; stroke-width: 2.5; }
+      @media (prefers-color-scheme: dark) {
+        .bg { fill: url(#bgDark); }
+        .bot-cov { fill: url(#botCovDark); fill-opacity: 0.95; stroke: #FF7B91; stroke-opacity: 0.40; }
+        .mid-cov { fill: url(#midCovDark); stroke: #FFE0A8; stroke-opacity: 0.42; }
+        .top-cov { fill: url(#topCovDark); stroke: #FF869B; stroke-opacity: 0.45; }
+        .pages { fill: url(#pagesDark); }
+        .rib { fill: url(#ribDark); stroke: #FF8FA2; stroke-opacity: 0.50; }
+      }
+    </style>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" class="bg"/>
+
+  <g filter="url(#stackShadow)">
+    <path d="M 257.04 591 L 837.52 591 Q 850 591 850 603.48 L 850 604.52 Q 850 617 837.52 617 L 828 617 Q 811 677.5 828 738 L 837.52 738 Q 850 738 850 750.48 L 850 751.52 Q 850 764 837.52 764 L 257.04 764 C 194.76 764 174 732.86 174 677.5 C 174 622.14 194.76 591 257.04 591 Z" class="bot-cov"/>
+    <path d="M 263.14 617 L 830 617 Q 813 677.5 830 738 L 263.14 738 C 232.7 738 222 716.22 222 677.5 C 222 638.78 232.7 617 263.14 617 Z" class="pages"/>
+    <path d="M 744.8 423 C 804.2 423 824 452.7 824 505.5 C 824 558.3 804.2 588 744.8 588 L 208 588 Q 196 588 196 576 L 196 575 Q 196 563 208 563 L 217 563 Q 233 505.5 217 448 L 208 448 Q 196 448 196 436 L 196 435 Q 196 423 208 423 L 744.8 423 Z" class="mid-cov"/>
+    <path d="M 215 448 L 738.9 448 C 767.83 448 778 468.7 778 505.5 C 778 542.3 767.83 563 738.9 563 L 215 563 Q 231 505.5 215 448 Z" class="pages"/>
+    <path d="M 303.84 262 L 796.48 262 Q 808 262 808 273.52 L 808 274.48 Q 808 286 796.48 286 L 788 286 Q 773 341 788 396 L 796.48 396 Q 808 396 808 407.52 L 808 408.48 Q 808 420 796.48 420 L 303.84 420 C 246.96 420 228 391.56 228 341 C 228 290.44 246.96 262 303.84 262 Z" class="top-cov"/>
+    <path d="M 309.4 286 L 790 286 Q 775 341 790 396 L 309.4 396 C 281.72 396 272 376.2 272 341 C 272 305.8 281.72 286 309.4 286 Z" class="pages"/>
+    <path d="M 640 292 Q 640 286 647 286 L 701 286 Q 708 286 708 292 L 708 468 C 708 475 700 478 695 473 L 674 449 L 653 473 C 648 478 640 475 640 468 Z" fill="#5C0E19" fill-opacity="0.22" transform="translate(4, 10)"/>
+    <path d="M 640 292 Q 640 286 647 286 L 701 286 Q 708 286 708 292 L 708 468 C 708 475 700 478 695 473 L 674 449 L 653 473 C 648 478 640 475 640 468 Z" class="rib"/>
+  </g>
+</svg>

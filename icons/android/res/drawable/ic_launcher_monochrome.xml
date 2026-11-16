@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group
+        android:pivotX="512"
+        android:pivotY="513"
+        android:scaleX="0.68"
+        android:scaleY="0.68">
+        <!-- Bottom Book Casing & Inset Page Block -->
+        <path android:pathData="M 253.68 594.5 L 838.96 594.5 Q 850 594.5 850 605.54 L 850 605.46 Q 850 616.5 838.96 616.5 L 254.48 616.5 C 223.78 616.5 213 638.46 213 677.5 C 213 716.54 223.78 738.5 254.48 738.5 L 838.96 738.5 Q 850 738.5 850 749.54 L 850 749.46 Q 850 760.5 838.96 760.5 L 253.68 760.5 C 193.92 760.5 174 730.62 174 677.5 C 174 624.38 193.92 594.5 253.68 594.5 Z" android:fillColor="#FFFFFFFF"/>
+        <path android:pathData="M 265.64 629.5 L 819 629.5 Q 802 677.5 819 725.5 L 265.64 725.5 C 241.49 725.5 233 708.22 233 677.5 C 233 646.78 241.49 629.5 265.64 629.5 Z" android:fillColor="#FFFFFFFF"/>
+
+        <!-- Middle Book Casing & Inset Page Block (with negative-space ribbon moat) -->
+        <path android:fillType="evenOdd" android:pathData="M 748.16 426.5 C 805.04 426.5 824 454.94 824 505.5 C 824 556.06 805.04 584.5 748.16 584.5 L 206.58 584.5 Q 196 584.5 196 573.92 L 196 574.08 Q 196 563.5 206.58 563.5 L 747.56 563.5 C 776.75 563.5 787 542.62 787 505.5 C 787 468.38 776.75 447.5 747.56 447.5 L 206.58 447.5 Q 196 447.5 196 436.92 L 196 437.08 Q 196 426.5 206.58 426.5 L 748.16 426.5 Z M 624 274 L 724 274 L 724 488 L 674 466 L 624 488 Z" android:fillColor="#FFFFFFFF"/>
+        <path android:fillType="evenOdd" android:pathData="M 226 460.5 L 736.4 460.5 C 759.04 460.5 767 476.7 767 505.5 C 767 534.3 759.04 550.5 736.4 550.5 L 226 550.5 Q 242 505.5 226 460.5 Z M 624 274 L 724 274 L 724 488 L 674 466 L 624 488 Z" android:fillColor="#FFFFFFFF"/>
+
+        <!-- Top Book Casing & Inset Page Block (with negative-space ribbon moat) -->
+        <path android:fillType="evenOdd" android:pathData="M 300.48 265.5 L 797.88 265.5 Q 808 265.5 808 275.62 L 808 275.38 Q 808 285.5 797.88 285.5 L 300.74 285.5 C 272.81 285.5 263 305.48 263 341 C 263 376.52 272.81 396.5 300.74 396.5 L 797.88 396.5 Q 808 396.5 808 406.62 L 808 406.38 Q 808 416.5 797.88 416.5 L 300.48 416.5 C 246.12 416.5 228 389.32 228 341 C 228 292.68 246.12 265.5 300.48 265.5 Z" android:fillColor="#FFFFFFFF"/>
+        <path android:fillType="evenOdd" android:pathData="M 311.9 298.5 L 779 298.5 Q 764 341 779 383.5 L 311.9 383.5 C 290.51 383.5 283 368.2 283 341 C 283 313.8 290.51 298.5 311.9 298.5 Z M 624 274 L 724 274 L 724 488 L 674 466 L 624 488 Z" android:fillColor="#FFFFFFFF"/>
+
+        <!-- Swallowtail Bookmark Ribbon Nested Inside Moat -->
+        <path android:pathData="M 640 292 Q 640 286 647 286 L 701 286 Q 708 286 708 292 L 708 468 C 708 475 700 478 695 473 L 674 449 L 653 473 C 648 478 640 475 640 468 Z" android:fillColor="#FFFFFFFF"/>
+    </group>
+</vector>

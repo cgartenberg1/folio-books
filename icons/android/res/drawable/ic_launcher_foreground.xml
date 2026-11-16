@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <group
+        android:pivotX="512"
+        android:pivotY="513"
+        android:scaleX="0.70"
+        android:scaleY="0.70">
+        <!-- Bottom Book Casing & Pages -->
+        <path
+            android:pathData="M 257.04 591 L 837.52 591 Q 850 591 850 603.48 L 850 604.52 Q 850 617 837.52 617 L 828 617 Q 811 677.5 828 738 L 837.52 738 Q 850 738 850 750.48 L 850 751.52 Q 850 764 837.52 764 L 257.04 764 C 194.76 764 174 732.86 174 677.5 C 174 622.14 194.76 591 257.04 591 Z"
+            android:strokeColor="#66FFE8EC"
+            android:strokeWidth="4"
+            android:fillColor="#8FF6D0D6"/>
+            
+        <path android:pathData="M 263.14 617 L 830 617 Q 813 677.5 830 738 L 263.14 738 C 232.7 738 222 716.22 222 677.5 C 222 638.78 232.7 617 263.14 617 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="512" android:startY="617" android:endX="512" android:endY="738" android:type="linear">
+                    <item android:offset="0" android:color="#FFFCF9F2"/>
+                    <item android:offset="1" android:color="#FFEBE0D0"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- Middle Book Burnished Gilt Casing & Pages -->
+        <path
+            android:pathData="M 744.8 423 C 804.2 423 824 452.7 824 505.5 C 824 558.3 804.2 588 744.8 588 L 208 588 Q 196 588 196 576 L 196 575 Q 196 563 208 563 L 217 563 Q 233 505.5 217 448 L 208 448 Q 196 448 196 436 L 196 435 Q 196 423 208 423 L 744.8 423 Z"
+            android:strokeColor="#73FFE8BD"
+            android:strokeWidth="4">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="512" android:startY="423" android:endX="512" android:endY="588" android:type="linear">
+                    <item android:offset="0" android:color="#EBEABF79"/>
+                    <item android:offset="1" android:color="#EBB9833E"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path android:pathData="M 215 448 L 738.9 448 C 767.83 448 778 468.7 778 505.5 C 778 542.3 767.83 563 738.9 563 L 215 563 Q 231 505.5 215 448 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="512" android:startY="448" android:endX="512" android:endY="563" android:type="linear">
+                    <item android:offset="0" android:color="#FFFDF9F3"/>
+                    <item android:offset="1" android:color="#FFEDE2D3"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- Top Book Ruby-Claret Casing & Pages -->
+        <path
+            android:pathData="M 303.84 262 L 796.48 262 Q 808 262 808 273.52 L 808 274.48 Q 808 286 796.48 286 L 788 286 Q 773 341 788 396 L 796.48 396 Q 808 396 808 407.52 L 808 408.48 Q 808 420 796.48 420 L 303.84 420 C 246.96 420 228 391.56 228 341 C 228 290.44 246.96 262 303.84 262 Z"
+            android:strokeColor="#73FF8C9F"
+            android:strokeWidth="4">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="512" android:startY="262" android:endX="512" android:endY="420" android:type="linear">
+                    <item android:offset="0" android:color="#E6DC354C"/>
+                    <item android:offset="1" android:color="#E6931628"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path android:pathData="M 309.4 286 L 790 286 Q 775 341 790 396 L 309.4 396 C 281.72 396 272 376.2 272 341 C 272 305.8 281.72 286 309.4 286 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="512" android:startY="286" android:endX="512" android:endY="396" android:type="linear">
+                    <item android:offset="0" android:color="#FFFEFBF6"/>
+                    <item android:offset="1" android:color="#FFF1E8DB"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- Swallowtail Bookmark Ribbon -->
+        <path
+            android:pathData="M 640 292 Q 640 286 647 286 L 701 286 Q 708 286 708 292 L 708 468 C 708 475 700 478 695 473 L 674 449 L 653 473 C 648 478 640 475 640 468 Z"
+            android:strokeColor="#73FF8A9D"
+            android:strokeWidth="3">
+            <aapt:attr name="android:fillColor">
+                <gradient android:startX="674" android:startY="286" android:endX="674" android:endY="472" android:type="linear">
+                    <item android:offset="0" android:color="#FFD82B41"/>
+                    <item android:offset="1" android:color="#FF8D1324"/>
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>
