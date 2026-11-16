@@ -7,6 +7,7 @@ import {
   isStrictSecondaryReissueTitle,
   mergeCanonicalBookPair,
   normalizeAuthorCanonicalKey,
+  parseCanonicalWorkParts,
   pickCanonicalReleaseDate,
   pickCleanerTitle,
   sanitizeCatalogReleaseDate,
@@ -1801,6 +1802,15 @@ async function lookupBestGoogleBookMatch(params: {
     todayStr = getLocalTodayStr(),
   } = params;
   const cleanedTitle = cleanDisplayBookTitle(title);
+  const parsedWork = parseCanonicalWorkParts(cleanedTitle);
+  const hasDistinctSubtitle = Boolean(
+    parsedWork.subKey && !parsedWork.isDescriptiveSub
+  );
+  const cleanFullSearchTitle = cleanedTitle
+    .replace(/\([^)]*\)/g, '')
+    .replace(/['’‘`]/g, "'")
+    .replace(/"/g, '')
+    .trim();
   const rawHead = (
     cleanedTitle.split(/\s*[:—–(]\s*/)[0].trim() ||
     cleanedTitle ||
@@ -1809,6 +1819,9 @@ async function lookupBestGoogleBookMatch(params: {
     .replace(/['’‘`]/g, "'")
     .replace(/"/g, '');
   if (!rawHead) return null;
+
+  const primarySearchPhrase =
+    hasDistinctSubtitle && cleanFullSearchTitle ? cleanFullSearchTitle : rawHead;
 
   const cleanAuthor = (authorName || '').replace(/"/g, '').trim();
   const normAuthor = normalizeAuthorKey(authorName || '');
@@ -1827,10 +1840,10 @@ async function lookupBestGoogleBookMatch(params: {
   };
 
   // Query by quoted phrase + full author name first so single-word titles with common
-  // surnames (e.g. "Atmosphere" by Taylor Jenkins Reid) return all editions of that author's book.
+  // surnames (e.g. "Atmosphere" by Taylor Jenkins Reid) and subtitled companion works resolve accurately.
   const primaryQuery = cleanAuthor
-    ? `"${rawHead}" inauthor:"${cleanAuthor}"`
-    : `"${rawHead}"`;
+    ? `"${primarySearchPhrase}" inauthor:"${cleanAuthor}"`
+    : `"${primarySearchPhrase}"`;
 
   let rawItems = await fetchVolumes(primaryQuery);
 
@@ -2081,7 +2094,7 @@ export async function fetchAuthorBibliography(params: {
       ? todayOverride
       : getLocalTodayStr();
 
-  const bibCacheKey = `bib:v8:en:${todayStr}::${source}::${externalId || ''}::${authorName
+  const bibCacheKey = `bib:v9:en:${todayStr}::${source}::${externalId || ''}::${authorName
     .trim()
     .toLowerCase()}::${Boolean(hardcoverToken?.trim())}`;
   if (!forceRefresh) {
@@ -2604,6 +2617,9 @@ export async function enrichBooksBatch(params: {
           );
 
           const existingPass1 = matches[item.clientKey];
+          if (item.authorName && canonicalDocs.length === 0) {
+            return;
+          }
           if (existingPass1 && canonicalDocs.length === 0) {
             return;
           }

@@ -1577,7 +1577,7 @@ export function BookTrackerApp() {
       return;
     }
 
-    const repairKey = `folio:ledger-repair:v7:${authUserId || 'local'}`;
+    const repairKey = `folio:ledger-repair:v8:${authUserId || 'local'}`;
     if (autoRepairInFlightKeyRef.current === repairKey) return;
     try {
       if (localStorage.getItem(repairKey) === '1') return;

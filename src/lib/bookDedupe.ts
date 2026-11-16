@@ -123,8 +123,38 @@ const EDITION_DECORATION_PATTERNS: RegExp[] = [
   /\bretail\s+edition\b/i,
 ];
 
-const DESCRIPTIVE_SUBTITLE_RE =
-  /\b(novel|novella|story|stories|tale|tales|thriller|mystery|romance|memoir|biography|autobiography|fantasy|litrpg|saga|chronicles|trilogy|duology|series|edition|paperback|hardcover|reissue|guide|handbook|history|life\s+and\s+times|book\s+club|pick|bestseller)\b/i;
+const EDITION_OR_PROMO_SUBTITLE_RE =
+  /\b(?:edition|paperback|hardcover|hardback|reissue|repackage|large\s+print|unabridged|abridged|book\s+club|bestseller|bestselling|tie-?in|major\s+motion\s+picture|now\s+streaming|anniversary|illustrated|annotated|expanded|revised|updated|restored)\b/i;
+
+const GENRE_OR_FORM_SUBTITLE_RE =
+  /^(?:(?:a|an|the)\s+(?:[a-z0-9'’-]+\s+){0,3})?(?:novel|novella|short\s+stories|stories|short\s+story(?:\s+collection)?|story\s+collection|thriller|mystery|romance|rom-?com|romantic\s+comedy|memoir|biography|autobiography|love\s+story|ghost\s+story|fairy\s+tale|retelling|poems|poetry|essays|litrpg(?:\s+adventure)?|progression\s+fantasy|space\s+opera|urban\s+fantasy)(?:\s+(?:of|about|from|in)\s+.+)?$/i;
+
+const SERIES_OR_UNIVERSE_SUBTITLE_RE =
+  /^(?:(?:book|volume|vol\.?|part)\s+(?:\d+|one|two|three|four|five|i|ii|iii|iv|v)\b.*|from\s+the\s+(?:world|universe|pages|author)\s+of\b.*|(?:a|an|the)\s+[a-z0-9'’\s&-]{1,40}\s+(?:series|trilogy|duology|quartet|saga|cycle)(?:\s+novel|\s+novella)?)$/i;
+
+const NONFICTION_EXPLANATORY_SUBTITLE_RE =
+  /^(?:(?:how|why|what)\s+(?:to|i|we|you|the|a|an|our|your)\b.*|(?:the\s+)?(?:true|untold|inside|life\s+and\s+times)\s+(?:story\s+of|of)\b.*|(?:a\s+|an\s+|the\s+(?:complete\s+|ultimate\s+|definitive\s+)?)?(?:guide\s+to|field\s+guide\s+to|handbook\s+(?:of|for|to)|manual\s+(?:of|for)|introduction\s+to|a\s*(?:-|–|—|to)\s*z\s+of)\b.*|(?:notes|essays|meditations|reflections|lessons)\s+(?:on|in|from)\b.*)$/i;
+
+function isDescriptiveSubtitle(
+  rawSub: string,
+  subKey: string,
+  headKey: string
+): boolean {
+  if (!subKey || subKey === headKey) return true;
+  const trimmed = rawSub.trim();
+  if (!trimmed) return true;
+
+  if (EDITION_OR_PROMO_SUBTITLE_RE.test(trimmed)) return true;
+  if (GENRE_OR_FORM_SUBTITLE_RE.test(trimmed)) return true;
+  if (SERIES_OR_UNIVERSE_SUBTITLE_RE.test(trimmed)) return true;
+  if (NONFICTION_EXPLANATORY_SUBTITLE_RE.test(trimmed)) return true;
+
+  const subWords = subKey.split(' ').filter(Boolean);
+  // Long explanatory non-fiction subtitles (9+ words) are descriptive rather than sequel titles
+  if (subWords.length >= 9) return true;
+
+  return false;
+}
 
 export function isLikelyNoiseTitle(title: string, filterUntitled = false): boolean {
   const trimmed = (title || '').trim();
@@ -365,16 +395,8 @@ export function parseCanonicalWorkParts(rawTitle: string): CanonicalWorkParts {
   const headKey = normalizeSegmentTokens(rawHead, true);
   let subKey = rawSub ? normalizeSegmentTokens(rawSub, false) : '';
 
-  // Check if subtitle is a marketing/genre/edition descriptor rather than a distinct sequel title
-  const subWords = subKey.split(' ').filter(Boolean);
-  const isDescriptiveSub =
-    !subKey ||
-    DESCRIPTIVE_SUBTITLE_RE.test(rawSub) ||
-    /^(?:a|an|the|how|why|what|when|where|notes|essays|memoir|poems)\b/i.test(
-      rawSub.trim()
-    ) ||
-    subWords.length >= 5 ||
-    subKey === headKey;
+  // Check if subtitle is a marketing/genre/edition/explanatory descriptor rather than a distinct sequel or companion title
+  const isDescriptiveSub = isDescriptiveSubtitle(rawSub, subKey, headKey);
 
   if (subKey && subKey === headKey) {
     subKey = '';
@@ -443,11 +465,11 @@ export function areSameCanonicalWork(
     return true;
   }
 
-  // Match "Title" against "Title: Marketing/Genre Subtitle"
+  // Match "Title" against "Title: Marketing/Genre Subtitle" ONLY when neither side carries a distinct work subtitle
   if (pa.headKey === pb.headKey && pa.headKey.length >= 4) {
     const aHasDistinctSub = Boolean(pa.subKey && !pa.isDescriptiveSub);
     const bHasDistinctSub = Boolean(pb.subKey && !pb.isDescriptiveSub);
-    if (!aHasDistinctSub || !bHasDistinctSub) {
+    if (!aHasDistinctSub && !bHasDistinctSub) {
       return true;
     }
   }
